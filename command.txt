@@ -1,0 +1,316 @@
+TinyNav Jetson command reference
+Last updated: 2026-06-16
+Repo: /home/nvidia/twork/tinynav
+Symlink: /tinynav
+
+===============================================================================
+0. Base environment
+===============================================================================
+
+source /home/nvidia/twork/tinynav_setup.bash
+cd /home/nvidia/twork/tinynav
+
+# Optional Python venv activation for direct Python work.
+source /home/nvidia/twork/tinynav/.venv/bin/activate
+
+# Quick status.
+git status --short
+ros2 topic list | sort
+
+===============================================================================
+1. Minimal daily flow
+===============================================================================
+
+# Build a fresh map from RealSense.
+# Walk slowly. Press Ctrl-C once to stop recording; the script then validates
+# the bag and builds the map.
+source /home/nvidia/twork/tinynav_setup.bash
+cd /home/nvidia/twork/tinynav
+bash scripts/tinynav_auto_map.sh
+
+# Latest map symlink.
+ls -lah /home/nvidia/twork/tinynav/output/latest_map
+
+# Start navigation using output/latest_map.
+# This starts RViz, TinyNav nodes, RViz-goal-to-POI bridge, diagnostics, and
+# the Go2 bridge by default.
+source /home/nvidia/twork/tinynav_setup.bash
+cd /home/nvidia/twork/tinynav
+bash scripts/tinynav_auto_nav.sh
+
+# Start navigation without sending /cmd_vel to Go2.
+bash scripts/tinynav_auto_nav.sh --no-go2
+
+# Use a specific map.
+bash scripts/tinynav_auto_nav.sh --map /home/nvidia/twork/tinynav/output/latest_map
+
+# Attach / stop.
+tmux attach -t tinynav_nav_auto
+tmux kill-session -t tinynav_nav_auto
+
+===============================================================================
+2. RealSense
+===============================================================================
+
+source /home/nvidia/twork/tinynav_setup.bash
+
+# Device, firmware, USB speed.
+rs-fw-update -l
+rs-enumerate-devices | rg -i 'name|serial|firmware|usb|product'
+lsusb -t
+
+# Start TinyNav RealSense profile.
+cd /home/nvidia/twork/tinynav
+bash scripts/run_realsense_sensor.sh
+
+# Equivalent launch arguments.
+ros2 launch realsense2_camera rs_launch.py \
+  initial_reset:=true \
+  tf_publish_rate:=1.0 \
+  publish_tf:=true \
+  enable_depth:=true \
+  enable_color:=true \
+  enable_infra1:=true \
+  enable_infra2:=true \
+  enable_gyro:=true \
+  enable_accel:=true \
+  unite_imu_method:=2 \
+  depth_module.depth_profile:=848x480x30 \
+  depth_module.infra_profile:=848x480x30 \
+  rgb_camera.color_profile:=848x480x30
+
+# Check stream health.
+ros2 topic hz /camera/camera/infra1/image_rect_raw
+ros2 topic hz /camera/camera/infra2/image_rect_raw
+ros2 topic hz /camera/camera/depth/image_rect_raw
+ros2 topic hz /camera/camera/color/image_raw
+ros2 topic hz /camera/camera/imu
+
+===============================================================================
+3. Mapping details
+===============================================================================
+
+# Automatic mapping is preferred.
+source /home/nvidia/twork/tinynav_setup.bash
+cd /home/nvidia/twork/tinynav
+bash scripts/tinynav_auto_map.sh
+
+# Validate an existing bag manually.
+uv run python tool/validate_tinynav_bag.py \
+  /home/nvidia/.local/share/tinynav/rosbags/<bag_name>
+
+# Inspect bag.
+ros2 bag info /home/nvidia/.local/share/tinynav/rosbags/<bag_name>
+
+# Inspect latest map.
+python3 - <<'PY'
+from pathlib import Path
+import numpy as np
+p = Path('/home/nvidia/twork/tinynav/output/latest_map')
+for f in ['poses.npy', 'mapping_continuous_odom.npy', 'occupancy_grid.npy',
+          'occupancy_meta.npy', 'sdf_map.npy', 'intrinsics.npy']:
+    x = np.load(p / f, allow_pickle=True)
+    print(f, 'shape=', getattr(x, 'shape', None), 'dtype=', getattr(x, 'dtype', None))
+PY
+
+===============================================================================
+4. Navigation details
+===============================================================================
+
+source /home/nvidia/twork/tinynav_setup.bash
+cd /home/nvidia/twork/tinynav
+
+# Default full stack.
+bash scripts/tinynav_auto_nav.sh
+
+# No robot motion, RViz/ROS only.
+bash scripts/tinynav_auto_nav.sh --no-go2
+
+# Use upstream baseline RViz instead of the diagnostic RViz.
+TINYNAV_RVIZ_CONFIG=/tinynav/docs/vis.rviz bash scripts/tinynav_auto_nav.sh
+
+# Windows in tmux.
+tmux list-windows -t tinynav_nav_auto
+tmux capture-pane -pt tinynav_nav_auto:camera -S -160
+tmux capture-pane -pt tinynav_nav_auto:perception -S -160
+tmux capture-pane -pt tinynav_nav_auto:planning -S -160
+tmux capture-pane -pt tinynav_nav_auto:map -S -260
+tmux capture-pane -pt tinynav_nav_auto:control -S -160
+tmux capture-pane -pt tinynav_nav_auto:go2-bridge -S -160
+tmux capture-pane -pt tinynav_nav_auto:rviz -S -120
+
+===============================================================================
+5. RViz goal to TinyNav POI
+===============================================================================
+
+# In RViz, use "2D Goal Pose". The bridge converts /goal_pose into:
+#   <map>/pois.json
+#   /mapping/cmd_pois
+#   /rviz_goal_pose_marker
+#   /rviz_goal_marker
+
+source /home/nvidia/twork/tinynav_setup.bash
+cd /home/nvidia/twork/tinynav
+uv run python tool/rviz_goal_to_poi.py \
+  --tinynav_map_path /home/nvidia/twork/tinynav/output/latest_map \
+  --z 0.0 \
+  --marker-z-offset 1.5
+
+# Append instead of replacing the active single POI.
+uv run python tool/rviz_goal_to_poi.py \
+  --tinynav_map_path /home/nvidia/twork/tinynav/output/latest_map \
+  --append \
+  --z 0.0
+
+# Inspect current POIs.
+cat /home/nvidia/twork/tinynav/output/latest_map/pois.json
+ros2 topic echo /mapping/cmd_pois
+
+===============================================================================
+6. Localization and goal-success diagnostics
+===============================================================================
+
+source /home/nvidia/twork/tinynav_setup.bash
+
+# Current pose in the saved map frame.
+ros2 topic echo /mapping/current_pose_in_map
+
+# Successful visual relocalization poses. If this is quiet, global relocalization
+# is not currently succeeding.
+ros2 topic echo /map/relocalization
+
+# Navigation progress.
+ros2 topic echo /mapping/nav_progress
+
+# Goal success. This is not latched; start listening before a run.
+ros2 topic echo /mapping/nav_done
+
+# Local and global planning outputs.
+ros2 topic echo /mapping/global_plan
+ros2 topic echo /planning/trajectory_path
+ros2 topic echo /cmd_vel
+
+# Log checks.
+tmux capture-pane -pt tinynav_nav_auto:map -S -5000 | rg 'nav done|All POIs|relocaliz|not enough|PnP'
+tmux capture-pane -pt tinynav_nav_auto:go2-bridge -S -200 | rg 'Move|Released|StopMove'
+
+===============================================================================
+7. RViz diagnostic layers
+===============================================================================
+
+# Default diagnostic RViz:
+#   /tinynav/docs/vis_with_global_map.rviz
+#
+# Important layers:
+#   Static Global Map          /mapping/static_occupancy_grid
+#   Map Keyframe Path          /mapping/map_keyframe_path
+#   Map Keyframes              /mapping/map_keyframe_markers
+#   Current Pose In Map        /mapping/current_pose_in_map
+#   Relocalization Successes   /map/relocalization
+#   Global Plan                /mapping/global_plan
+#   Local Trajectory           /planning/trajectory_path
+
+source /home/nvidia/twork/tinynav_setup.bash
+cd /home/nvidia/twork/tinynav
+
+# Start static map publisher.
+uv run python tool/static_occupancy_grid_publisher.py \
+  --tinynav-map-path /home/nvidia/twork/tinynav/output/latest_map \
+  --topic /mapping/static_occupancy_grid \
+  --frame-id world \
+  --z 0.0
+
+# Start saved map keyframe publisher.
+uv run python tool/map_keyframe_publisher.py \
+  --tinynav-map-path /home/nvidia/twork/tinynav/output/latest_map \
+  --frame-id world
+
+===============================================================================
+8. VNC and RViz
+===============================================================================
+
+# Current stable headless display:
+#   address: <jetson-lan-ip>:5901
+#   password: set locally with TINYNAV_VNC_PASSWORD; do not commit it
+#   display: :1
+#   server: TigerVNC
+#
+# The real GNOME :0 desktop is black when HDMI is disconnected. Use :1.
+
+export TINYNAV_VNC_PASSWORD='<private-vnc-password>'
+bash /home/nvidia/twork/tinynav/scripts/run_visible_vnc.sh
+vncserver -list
+ss -ltnp | rg ':5901|Xtigervnc'
+
+# Start RViz manually in VNC.
+source /home/nvidia/twork/tinynav_setup.bash
+cd /home/nvidia/twork/tinynav
+export DISPLAY=:1
+export XAUTHORITY=/home/nvidia/.Xauthority
+export QT_X11_NO_MITSHM=1
+export LIBGL_ALWAYS_SOFTWARE=1
+ros2 run rviz2 rviz2 -d /tinynav/docs/vis_with_global_map.rviz
+
+# Move RViz onscreen if openbox places it at the corner.
+DISPLAY=:1 XAUTHORITY=/home/nvidia/.Xauthority wmctrl -r RViz -e 0,0,0,1280,720
+
+# Screenshot from server side.
+DISPLAY=:1 XAUTHORITY=/home/nvidia/.Xauthority scrot /tmp/vnc_rviz.png
+file /tmp/vnc_rviz.png
+
+===============================================================================
+9. Unitree Go2 bridge and keyboard test
+===============================================================================
+
+# Wired Go2 network. The static IP command is temporary and disappears after
+# reboot. Do not run teleop and TinyNav navigation at the same time unless you
+# intentionally want multiple /cmd_vel publishers.
+
+sudo ip addr add 192.168.123.100/24 dev eth0 2>/dev/null || true
+sudo ip link set eth0 up
+ping -I eth0 -c 1 192.168.123.161
+
+# Start Go2 bridge in foreground.
+source /home/nvidia/twork/tinynav_setup.bash
+cd /home/nvidia/twork/tinynav
+export UNITREE_NET_IF=eth0
+export GO2_CMD_TOPIC=/cmd_vel
+export GO2_MAX_VX=0.45
+export GO2_MAX_VY=0.25
+export GO2_MAX_WZ=0.80
+export GO2_MIN_CMD_V=0.10
+export GO2_MIN_CMD_W=0.20
+export GO2_LOG_COMMANDS=true
+bash scripts/run_go2_cmd_bridge.sh
+
+# Keyboard teleop in another terminal.
+source /home/nvidia/twork/tinynav_setup.bash
+cd /home/nvidia/twork/tinynav
+bash scripts/run_keyboard_teleop.sh --topic /cmd_vel --linear-speed 0.30 --angular-speed 0.55
+
+# Controls:
+#   w/s       forward/backward
+#   q/e       strafe left/right
+#   a/d       turn left/right
+#   space/x   stop
+#   +/-       speed scale
+#   h         help
+#   Ctrl-C    stop and exit
+
+===============================================================================
+10. Stop and cleanup
+===============================================================================
+
+tmux kill-session -t tinynav_nav_auto
+tmux kill-session -t tinynav_usb3_camera
+tmux kill-session -t tinynav_auto_map_camera
+vncserver -kill :1
+
+# Runtime data is intentionally ignored by git:
+#   output/
+#   tinynav_temp_nav_auto/
+#   tinynav_db/
+#   tinynav_temp/
+#   *.db
+#   *.plan
+#   *.engine

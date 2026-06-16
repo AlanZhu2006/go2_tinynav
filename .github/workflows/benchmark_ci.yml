@@ -1,0 +1,59 @@
+name: Benchmark CI
+on:
+  workflow_dispatch:
+
+jobs:
+  benchmark-mapping:
+    runs-on: X64
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Perform Git LFS Checkout
+        run: git lfs checkout
+
+      - name: Extract short commit SHA
+        id: vars
+        run: echo "SHORT_SHA=${GITHUB_SHA::7}" >> $GITHUB_ENV
+
+      - name: Benchmark mapping
+        run: |
+            docker run --rm -i --gpus all \
+            --entrypoint "" \
+            -v /tmp/benchmark_data_cache:/tmp/benchmark_data_cache \
+            -v /tmp/benchmark_results:/tmp/benchmark_results \
+            -v ${{ github.workspace }}:/tinynav \
+            -w /tinynav \
+            uniflexai/tinynav:latest \
+            bash -c "
+              set -e
+              source /opt/ros/humble/setup.bash
+              source /3rdparty/ros2_ws/install/local_setup.bash
+              cd /tinynav/tinynav/models
+              make all
+              cd /tinynav
+              uv venv --system-site-packages
+              chmod 777 -R /tinynav/.venv
+              mkdir -p /tmp/benchmark_results/${{env.SHORT_SHA}}
+              bag_a_path=/tmp/benchmark_data_cache/rosbag2_2025_09_17-16_27_38
+              bag_b_path=/tmp/benchmark_data_cache/rosbag2_2025_09_17-16_31_03
+              uv run python tool/benchmark/benchmark_mapping.py \
+                --bag_a \$bag_a_path \
+                --bag_b \$bag_b_path \
+                --output_dir /tmp/benchmark_results/${{env.SHORT_SHA}}
+              chmod -R 777 /tinynav
+            "
+
+      - name: Authenticate GitHub CLI
+        run: |
+           gh auth login --with-token <<< "${{ secrets.GITHUB_TOKEN }}"
+
+      - name: Find merged PR
+        run: |
+          PR_NUMBER=$(gh pr list --state merged --json number,title --jq '.[0].number')
+          echo "PR_NUMBER=${PR_NUMBER}" >> $GITHUB_ENV
+          gh pr comment ${PR_NUMBER} --body-file /tmp/benchmark_results/${{ env.SHORT_SHA }}/metrics_summary.md
+          gh pr comment ${PR_NUMBER} --body-file /tmp/benchmark_results/${{ env.SHORT_SHA }}/precision_summary.md

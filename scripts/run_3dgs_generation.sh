@@ -1,0 +1,19 @@
+#!/bin/bash
+uv pip install .[3dgs]
+data_path=/tinynav/output/map_color_benchmark01
+output_path=/tinynav/output/map_color_benchmark01
+uv run python tool/convert_to_nerf_format.py --map-dir "$data_path"
+MAX_JOBS=1 uv run ns-train splatfacto \
+      --output-dir $output_path \
+      --experiment-name experiment \
+      --method-name splatfacto \
+      --timestamp 0 \
+      --pipeline.model.cull_alpha_thresh=0.005 \
+      --pipeline.model.use_scale_regularization True \
+      --viewer.quit-on-train-completion True \
+    nerfstudio-data \
+      --data $data_path \
+      --center-method none \
+      --auto-scale-poses False \
+      --orientation_method none
+uv run ns-export gaussian-splat --load-config "$output_path/experiment/splatfacto/0/config.yml"  --output-dir "$output_path"

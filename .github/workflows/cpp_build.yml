@@ -1,0 +1,29 @@
+name: cpp build
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: X64
+    container:
+      image: uniflexai/tinynav:latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          lfs: false
+
+      - name: Build
+        shell: bash
+        run: |
+          source /opt/ros/humble/setup.bash
+          colcon --log-base /tmp/cpp_log build \
+            --build-base /tmp/cpp_build \
+            --install-base /tmp/cpp_install
+          chmod -R 777 $(pwd)/*
+          chmod -R 777 $(pwd)/.git
