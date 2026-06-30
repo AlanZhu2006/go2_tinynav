@@ -370,7 +370,7 @@ class PlanningNode(Node):
 
         self.ts = message_filters.TimeSynchronizer([self.depth_sub, self.pose_sub], queue_size=10)
         self.ts.registerCallback(self.sync_callback)
-        self.camerainfo_sub = self.create_subscription(CameraInfo, '/camera/camera/infra2/camera_info', self.info_callback, 10)
+        self.camerainfo_sub = self.create_subscription(CameraInfo, '/camera/camera/color/camera_info', self.info_callback, 10)
 
         self.grid_shape = (100, 100, 10)
         self.resolution = 0.1
@@ -401,11 +401,8 @@ class PlanningNode(Node):
     def info_callback(self, msg):
         if self.K is None:
             self.K = np.array(msg.k).reshape(3, 3)
-            # P[0,3] = -fx * baseline
-            fx = self.K[0, 0]
-            Tx = msg.p[3] # From the right camera's projection matrix
-            self.baseline = -Tx / fx
-            self.get_logger().info(f"Camera intrinsics and baseline received. Baseline: {self.baseline:.4f}m")
+            self.baseline = 0.0
+            self.get_logger().info("Color camera intrinsics received.")
             self.destroy_subscription(self.camerainfo_sub)
 
     def camera_to_robot_center(self, T):

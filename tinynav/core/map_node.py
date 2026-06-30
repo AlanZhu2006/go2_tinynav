@@ -211,7 +211,7 @@ class MapNode(Node):
         self.ts = TimeSynchronizer([self.keyframe_image_sub, self.keyframe_odom_sub, self.depth_sub], 10)
         self.ts.registerCallback(self.keyframe_callback)
 
-        self.camera_info_sub = self.create_subscription(CameraInfo, '/camera/camera/infra2/camera_info', self.info_callback, 10)
+        self.camera_info_sub = self.create_subscription(CameraInfo, '/camera/camera/color/camera_info', self.info_callback, 10)
         self.K = None
         self.baseline = None
         self.last_keyframe_image = None
@@ -299,11 +299,9 @@ class MapNode(Node):
 
     def info_callback(self, msg:CameraInfo):
         if self.K is None:
-            self.get_logger().info("Camera intrinsics received.")
+            self.get_logger().info("Color camera intrinsics received.")
             self.K = np.array(msg.k).reshape(3, 3)
-            fx = self.K[0, 0]
-            Tx = msg.p[3]
-            self.baseline = -Tx / fx
+            self.baseline = 0.0
             self.destroy_subscription(self.camera_info_sub)
 
     def continuous_odom_callback(self, odom_msg: Odometry):
@@ -585,6 +583,11 @@ class MapNode(Node):
             self.get_logger().info("Relocalization not successful yet, skip publishing nav path")
             return
 
+        # Publish the current pose as soon as map-to-odom is known, even before
+        # a target POI exists. This makes RViz/debug UIs useful during localization-only checks.
+        pose_in_map = np.linalg.inv(self.T_from_map_to_odom) @ self.pose_graph_used_pose[timestamp]
+        self.current_pose_in_map_pub.publish(np2msg(pose_in_map, self.get_clock().now().to_msg(), "world", "map"))
+
         if self.poi_index == -1:
             self.get_logger().info("No POI found, skip publishing nav path")
             return
@@ -598,9 +601,6 @@ class MapNode(Node):
         poi_pose = np.eye(4)
         poi_pose[:3, 3] = poi
         self.poi_pub.publish(np2msg(poi_pose, self.get_clock().now().to_msg(), "world", "map"))
-        # get the pose from the map to the odom
-        pose_in_map = np.linalg.inv(self.T_from_map_to_odom) @ self.pose_graph_used_pose[timestamp]
-        self.current_pose_in_map_pub.publish(np2msg(pose_in_map, self.get_clock().now().to_msg(), "world", "map"))
 
         pose_in_map_position = pose_in_map[:3, 3]
 

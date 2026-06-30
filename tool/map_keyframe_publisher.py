@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 from pathlib import Path
 
 import numpy as np
@@ -16,15 +17,23 @@ from scipy.spatial.transform import Rotation
 from visualization_msgs.msg import Marker, MarkerArray
 
 
-def pose_from_matrix(matrix: np.ndarray, frame_id: str, stamp) -> PoseStamped:
+def pose_from_matrix(matrix: np.ndarray, frame_id: str, stamp, project_z: float | None = None) -> PoseStamped:
     pose = PoseStamped()
     pose.header.frame_id = frame_id
     pose.header.stamp = stamp
     t = matrix[:3, 3]
-    q = Rotation.from_matrix(matrix[:3, :3]).as_quat()
     pose.pose.position.x = float(t[0])
     pose.pose.position.y = float(t[1])
-    pose.pose.position.z = float(t[2])
+    pose.pose.position.z = float(t[2] if project_z is None else project_z)
+
+    if project_z is None:
+        q = Rotation.from_matrix(matrix[:3, :3]).as_quat()
+    else:
+        # TinyNav camera/body convention uses +Z as forward. Project it to map XY.
+        forward = matrix[:3, :3] @ np.array([0.0, 0.0, 1.0])
+        yaw = math.atan2(float(forward[1]), float(forward[0]))
+        q = Rotation.from_euler("z", yaw).as_quat()
+
     pose.pose.orientation.x = float(q[0])
     pose.pose.orientation.y = float(q[1])
     pose.pose.orientation.z = float(q[2])
@@ -33,10 +42,11 @@ def pose_from_matrix(matrix: np.ndarray, frame_id: str, stamp) -> PoseStamped:
 
 
 class MapKeyframePublisher(Node):
-    def __init__(self, map_path: Path, frame_id: str, period: float):
+    def __init__(self, map_path: Path, frame_id: str, period: float, project_z: float | None):
         super().__init__("map_keyframe_publisher")
         self.frame_id = frame_id
         self.map_path = map_path
+        self.project_z = project_z
         qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
             depth=1,
@@ -46,6 +56,8 @@ class MapKeyframePublisher(Node):
         self.path_pub = self.create_publisher(PathMsg, "/mapping/map_keyframe_path", qos)
         self.marker_pub = self.create_publisher(MarkerArray, "/mapping/map_keyframe_markers", qos)
         self.poses = self.load_poses(map_path)
+        mode = "3D" if project_z is None else f"2D projected at z={project_z:.2f}"
+        self.get_logger().info(f"Publishing map keyframe trajectory in {mode} on /mapping/map_keyframe_path")
         self.create_timer(max(0.5, float(period)), self.publish)
         self.publish()
 
@@ -63,7 +75,7 @@ class MapKeyframePublisher(Node):
         path = PathMsg()
         path.header.frame_id = self.frame_id
         path.header.stamp = stamp
-        path.poses = [pose_from_matrix(pose, self.frame_id, stamp) for pose in self.poses]
+        path.poses = [pose_from_matrix(pose, self.frame_id, stamp, self.project_z) for pose in self.poses]
         self.path_pub.publish(path)
 
         markers = []
@@ -75,13 +87,13 @@ class MapKeyframePublisher(Node):
             line.id = 0
             line.type = Marker.LINE_STRIP
             line.action = Marker.ADD
-            line.scale.x = 0.035
+            line.scale.x = 0.08
             line.color.r = 1.0
             line.color.g = 1.0
             line.color.b = 0.1
             line.color.a = 1.0
             for pose in self.poses:
-                ps = pose_from_matrix(pose, self.frame_id, stamp)
+                ps = pose_from_matrix(pose, self.frame_id, stamp, self.project_z)
                 line.points.append(ps.pose.position)
             markers.append(line)
 
@@ -93,10 +105,10 @@ class MapKeyframePublisher(Node):
                 arrow.id = idx + 1
                 arrow.type = Marker.ARROW
                 arrow.action = Marker.ADD
-                arrow.pose = pose_from_matrix(pose, self.frame_id, stamp).pose
-                arrow.scale.x = 0.25
-                arrow.scale.y = 0.04
-                arrow.scale.z = 0.04
+                arrow.pose = pose_from_matrix(pose, self.frame_id, stamp, self.project_z).pose
+                arrow.scale.x = 0.35
+                arrow.scale.y = 0.07
+                arrow.scale.z = 0.07
                 arrow.color.r = 1.0
                 arrow.color.g = 0.95
                 arrow.color.b = 0.1
@@ -111,10 +123,16 @@ def main() -> None:
     parser.add_argument("--tinynav-map-path", type=Path, required=True)
     parser.add_argument("--frame-id", default="world")
     parser.add_argument("--period", type=float, default=1.0)
+    parser.add_argument(
+        "--project-z",
+        type=float,
+        default=None,
+        help="Project the saved keyframe trajectory to this fixed Z height for 2D map overlays.",
+    )
     args = parser.parse_args()
 
     rclpy.init()
-    node = MapKeyframePublisher(args.tinynav_map_path, args.frame_id, args.period)
+    node = MapKeyframePublisher(args.tinynav_map_path, args.frame_id, args.period, args.project_z)
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:

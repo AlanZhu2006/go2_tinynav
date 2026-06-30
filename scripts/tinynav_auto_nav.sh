@@ -195,7 +195,7 @@ tmux new-window -t "$SESSION_NAME" -n control \
 
 if [[ "$start_go2" == "true" ]]; then
   tmux new-window -t "$SESSION_NAME" -n go2-bridge \
-    "bash -lc 'source \"$SETUP_FILE\" && cd \"$ROOT_DIR\" && export UNITREE_NET_IF=\"$go2_net_if\" GO2_CMD_TOPIC=/cmd_vel GO2_MAX_VX=0.30 GO2_MAX_VY=0.00 GO2_MAX_WZ=0.70 GO2_MIN_CMD_V=0.10 GO2_MIN_CMD_W=0.20 GO2_LOG_COMMANDS=true && bash scripts/run_go2_cmd_bridge.sh'"
+    "bash -lc 'source \"$SETUP_FILE\" && cd \"$ROOT_DIR\" && export UNITREE_NET_IF=\"$go2_net_if\" GO2_CMD_TOPIC=/cmd_vel GO2_MAX_VX=0.30 GO2_MAX_VY=0.00 GO2_MAX_WZ=0.70 GO2_MIN_CMD_V=0.10 GO2_MIN_CMD_W=0.20 GO2_REMOTE_PRIORITY=true GO2_REMOTE_TOPIC=rt/lowstate GO2_REMOTE_DEADBAND=0.12 GO2_REMOTE_HOLD_SEC=0.8 GO2_LOG_COMMANDS=true && bash scripts/run_go2_cmd_bridge.sh'"
 fi
 
 tmux new-window -t "$SESSION_NAME" -n rviz-goal \

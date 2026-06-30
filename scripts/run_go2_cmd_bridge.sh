@@ -10,6 +10,7 @@ CYCLONEDDS_HOME="${CYCLONEDDS_HOME:-/home/nvidia/twork/cyclonedds/install}"
 UNITREE_NET_IF="${UNITREE_NET_IF:-eth0}"
 UNITREE_SDK2PY_PATH="${UNITREE_SDK2PY_PATH:-}"
 GO2_CMD_TOPIC="${GO2_CMD_TOPIC:-/cmd_vel}"
+GO2_TIMEOUT_SEC="${GO2_TIMEOUT_SEC:-0.35}"
 GO2_MAX_VX="${GO2_MAX_VX:-0.45}"
 GO2_MAX_VY="${GO2_MAX_VY:-0.25}"
 GO2_MAX_WZ="${GO2_MAX_WZ:-0.80}"
@@ -22,7 +23,10 @@ GO2_DEADBAND_W="${GO2_DEADBAND_W:-0.02}"
 GO2_MIN_CMD_V="${GO2_MIN_CMD_V:-0.10}"
 GO2_MIN_CMD_W="${GO2_MIN_CMD_W:-0.20}"
 GO2_SEND_ZERO_WHEN_IDLE="${GO2_SEND_ZERO_WHEN_IDLE:-false}"
-GO2_REMOTE_PRIORITY="${GO2_REMOTE_PRIORITY:-false}"
+GO2_REMOTE_PRIORITY="${GO2_REMOTE_PRIORITY:-true}"
+GO2_REMOTE_TOPIC="${GO2_REMOTE_TOPIC:-rt/lowstate}"
+GO2_REMOTE_DEADBAND="${GO2_REMOTE_DEADBAND:-0.12}"
+GO2_REMOTE_HOLD_SEC="${GO2_REMOTE_HOLD_SEC:-0.8}"
 GO2_LOG_COMMANDS="${GO2_LOG_COMMANDS:-true}"
 GO2_LOG_INTERVAL_SEC="${GO2_LOG_INTERVAL_SEC:-0.2}"
 
@@ -62,14 +66,17 @@ echo "  bridge:    $BRIDGE_SCRIPT"
 echo "  topic:     $GO2_CMD_TOPIC"
 echo "  interface: $UNITREE_NET_IF"
 echo "  cyclone:   $CYCLONEDDS_HOME"
+echo "  timeout:   ${GO2_TIMEOUT_SEC}s"
 echo "  limits:    vx=$GO2_MAX_VX vy=$GO2_MAX_VY wz=$GO2_MAX_WZ"
 echo "  floors:    v=$GO2_MIN_CMD_V w=$GO2_MIN_CMD_W"
+echo "  remote:    priority=$GO2_REMOTE_PRIORITY topic=$GO2_REMOTE_TOPIC deadband=$GO2_REMOTE_DEADBAND hold=${GO2_REMOTE_HOLD_SEC}s"
 
 exec uv run --extra unitree python "$BRIDGE_SCRIPT" \
   --net-if "$UNITREE_NET_IF" \
   --sdk-path "$UNITREE_SDK2PY_PATH" \
   --ros-args \
   -p cmd_vel_topic:="$GO2_CMD_TOPIC" \
+  -p timeout_sec:="$GO2_TIMEOUT_SEC" \
   -p max_vx:="$GO2_MAX_VX" \
   -p max_vy:="$GO2_MAX_VY" \
   -p max_wz:="$GO2_MAX_WZ" \
@@ -84,5 +91,8 @@ exec uv run --extra unitree python "$BRIDGE_SCRIPT" \
   -p enabled:=true \
   -p send_zero_when_idle:="$GO2_SEND_ZERO_WHEN_IDLE" \
   -p remote_priority:="$GO2_REMOTE_PRIORITY" \
+  -p remote_topic:="$GO2_REMOTE_TOPIC" \
+  -p remote_deadband:="$GO2_REMOTE_DEADBAND" \
+  -p remote_hold_sec:="$GO2_REMOTE_HOLD_SEC" \
   -p log_commands:="$GO2_LOG_COMMANDS" \
   -p log_interval_sec:="$GO2_LOG_INTERVAL_SEC"
