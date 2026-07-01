@@ -1,10 +1,11 @@
 import rclpy
+from rclpy.qos import QoSProfile, DurabilityPolicy
 import os
 import time
 from rclpy.node import Node
 from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import Path, Odometry
-from std_msgs.msg import Bool, String
+from std_msgs.msg import Float32, Bool, String
 import numpy as np
 import sys
 import json
@@ -225,7 +226,7 @@ class MapNode(Node):
         self.loop_similarity_threshold = 0.90
         self.loop_top_k = 1
 
-        self.relocalization_threshold = 0.85
+        self.relocalization_threshold = 0.70  # was 0.85; PnP verifies retrievals so a high gate just blocks live reloc
         self.relocalization_loop_top_k = 3
 
         os.makedirs(f"{tinynav_db_path}/nav_temp", exist_ok=True)
@@ -251,6 +252,7 @@ class MapNode(Node):
         self.pois = {}
         self.poi_index = -1
         self._nav_completed = False
+        self._arrival_count = 0
         self._leg_initial_length: float | None = None
         self._leg_start_time: float | None = None
         self._speed_estimate: float | None = None
@@ -263,6 +265,9 @@ class MapNode(Node):
         self.current_pose_pub = self.create_publisher(Odometry, "/mapping/current_pose", 10)
         self.global_plan_pub = self.create_publisher(Path, '/mapping/global_plan', 10)
         self.target_pose_pub = self.create_publisher(Odometry, "/control/target_pose", 10)
+        self.goal_distance_pub = self.create_publisher(Float32, "/control/goal_distance", 10)
+        _paused_qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        self.nav_paused_pub = self.create_publisher(Bool, "/nav/paused", _paused_qos)
 
         self.tf_broadcaster = TransformBroadcaster(self)
 
@@ -289,6 +294,8 @@ class MapNode(Node):
 
             self.poi_index = min(0, len(self.pois) - 1)
             self._nav_completed = False
+            self._arrival_count = 0
+            self.nav_paused_pub.publish(Bool(data=False))  # resume for the new goal
             self._leg_initial_length = None
             self._leg_start_time = None
             self._speed_estimate = None
@@ -469,7 +476,7 @@ class MapNode(Node):
                 continue
             pnp_candidates.append((point_3d_in_world_list, point_2d_in_keyframe_list))
 
-        success, best_pose_in_camera, pose_cov_weight, _, _, _ = rerank_by_pnp_inliers(pnp_candidates, self.map_K)
+        success, best_pose_in_camera, pose_cov_weight, _, _best_inl, _best_pc = rerank_by_pnp_inliers(pnp_candidates, self.map_K, min_inlier_count=20)
         if success:
             print(f"relocalization pose : {best_pose_in_camera}")
             return True, best_pose_in_camera, pose_cov_weight
@@ -608,7 +615,11 @@ class MapNode(Node):
             poi = self.pois[self.poi_index]
             diff_position_norm_xy = np.linalg.norm(poi[:2] - pose_in_map_position[:2])
             diff_position_norm_z = np.linalg.norm(poi[2] - pose_in_map_position[2])
-            if diff_position_norm_xy < 0.5 and diff_position_norm_z < 2.0:
+            if diff_position_norm_xy < 0.4 and diff_position_norm_z < 2.0:
+                self._arrival_count += 1
+                if self._arrival_count < 3:
+                    break   # debounce: need 3 consecutive in-radius frames (guards vs reloc jitter)
+                self._arrival_count = 0
                 if self._leg_initial_length is not None:
                     arrived_msg = String()
                     arrived_msg.data = json.dumps({
@@ -630,6 +641,7 @@ class MapNode(Node):
                 self.poi_change_pub.publish(np2msg(dummy_pose, stamp_msg, "world", "map"))
                 continue
             else:
+                self._arrival_count = 0
                 break
 
         if self.poi_index >= len(self.pois):
@@ -637,8 +649,12 @@ class MapNode(Node):
                 self._nav_completed = True
                 self.get_logger().info("All POIs have been visited, nav done")
                 self.nav_done_pub.publish(Bool(data=True))
+                self.poi_change_pub.publish(np2msg(np.eye(4), self.get_clock().now().to_msg(), "world", "map"))  # clear planner target
+                self.nav_paused_pub.publish(Bool(data=True))  # stop the base on completion
             return
 
+        goal_dist = float(np.linalg.norm(self.pois[self.poi_index][:2] - pose_in_map_position[:2]))
+        self.goal_distance_pub.publish(Float32(data=goal_dist))
         target_poi = self.pois[self.poi_index]
         with Timer(name = "generate nav path in map", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
             paths_in_map = self.generate_nav_path_in_map(pose_in_map = pose_in_map, target_poi = target_poi)

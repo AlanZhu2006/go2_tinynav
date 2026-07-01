@@ -3,7 +3,9 @@ from rclpy.node import Node
 from geometry_msgs.msg import Twist
 from nav_msgs.msg import Path
 from nav_msgs.msg import Odometry
-from std_msgs.msg import Bool
+from std_msgs.msg import Bool, Float32
+from sensor_msgs.msg import Image
+from cv_bridge import CvBridge
 from rclpy.qos import DurabilityPolicy, QoSProfile
 from scipy.spatial.transform import Rotation as R
 import numpy as np
@@ -41,7 +43,7 @@ class CmdVelControlNode(Node):
         self.path_stale_stop_factor = 5.0
         self.max_linear_acc = 0.6   # m/s^2
         self.max_angular_acc = 0.8  # rad/s^2
-        self.max_angular_speed = 0.8  # rad/s
+        self.max_angular_speed = 0.70  # rad/s; match TinyNav/Go2 bridge yaw cap while keeping stale-pose guards.
         self.planner_dt = 0.1       # trajectory dt in planning_node
         # planning_node publishes path with for j in range(..., step=10), so points are ~1.0 s apart.
         self.path_pose_stride = 10
@@ -55,7 +57,33 @@ class CmdVelControlNode(Node):
         self.fixed_reverse_speed = 0.2
         # Hack: if path first segment points far away from robot heading,
         # rotate in place instead of publishing near-zero cmd_vel.
-        self.force_turn_heading_threshold = np.deg2rad(80.0)
+        self.force_turn_heading_threshold = np.deg2rad(75.0)
+
+        # SAFE-CAPS for closed-loop over slow (~1Hz) perception:
+        self.pose_stale_stop_s = 0.8      # no cmd if localization has not updated within this
+        self.reloc_jump_thresh = 0.4      # m step between consecutive poses = reloc jump
+        self.reloc_freeze_s = 0.6         # freeze cmd this long after a reloc jump
+        self.last_pose_mono = None
+        self.prev_pose_xy = None
+        self.reloc_freeze_until = 0.0
+        # ARRIVAL braking: decelerate + stop near the goal so ~1Hz latency does not overshoot into walls.
+        # ARRIVAL braking on the FINAL-goal distance (map_node /control/goal_distance), NOT the 2.5m
+        # rolling lookahead (/control/target_pose). Stale-aware.
+        self.goal_dist = None
+        self.goal_dist_time = 0.0
+        self.arrival_radius = 0.5
+        self.arrival_gain = 0.7
+        self.create_subscription(Float32, '/control/goal_distance', self._goal_dist_cb, 10)
+        # RELOC-LOSS stop: if map localization goes stale, do not drive blind on a stale map-frame path.
+        self.last_reloc_mono = None
+        self.reloc_stale_stop_s = 4.0
+        self.create_subscription(Odometry, '/map/relocalization', self._reloc_cb, 10)
+        # Reactive forward E-STOP from LIVE depth (reloc-independent): stop if a wall is close ahead.
+        self._bridge = CvBridge()
+        self.front_clear = None
+        self.front_clear_time = 0.0
+        self.front_stop_dist = 0.5
+        self.create_subscription(Image, '/slam/depth', self._depth_cb, 5)
 
         self.latest_cmd = Twist()
         self.prev_cmd = Twist()
@@ -72,7 +100,34 @@ class CmdVelControlNode(Node):
             # Reset prev_cmd so resume starts from zero cleanly
             self.prev_cmd = Twist()
 
+    def _goal_dist_cb(self, msg):
+        self.goal_dist = float(msg.data); self.goal_dist_time = time.monotonic()
+
+    def _reloc_cb(self, msg):
+        self.last_reloc_mono = time.monotonic()
+
+    def _depth_cb(self, msg):
+        try:
+            d = self._bridge.imgmsg_to_cv2(msg, desired_encoding='passthrough')
+        except Exception:
+            return
+        d = np.asarray(d, dtype=np.float32)
+        h, w = d.shape[:2]
+        roi = d[int(h*0.30):int(h*0.90), int(w*0.30):int(w*0.70)]
+        valid = roi[(roi > 0.1) & (roi < 10.0)]
+        self.front_clear = float(np.percentile(valid, 5)) if valid.size > 50 else None
+        self.front_clear_time = time.monotonic()
+
     def pose_callback(self, msg):
+        now = time.monotonic()
+        p = msg.pose.pose.position
+        xy = np.array([p.x, p.y, p.z])
+        if (self.prev_pose_xy is not None and self.last_pose_mono is not None
+                and (now - self.last_pose_mono) < 0.5
+                and np.linalg.norm(xy - self.prev_pose_xy) > self.reloc_jump_thresh):
+            self.reloc_freeze_until = now + self.reloc_freeze_s  # reloc jumped -> briefly freeze cmd
+        self.prev_pose_xy = xy
+        self.last_pose_mono = now
         self.pose = msg
 
     def _clamp_step(self, target: float, current: float, max_delta: float) -> float:
@@ -84,6 +139,19 @@ class CmdVelControlNode(Node):
         self.last_cmd_pub_time = now
 
         if self._paused:
+            self.cmd_pub.publish(Twist())
+            self.prev_cmd = Twist()
+            return
+
+        # SAFE-CAP: perception stalled or reloc jumped -> do not drive on a stale/jumping pose.
+        if (self.last_pose_mono is None or (now - self.last_pose_mono) > self.pose_stale_stop_s
+                or now < self.reloc_freeze_until):
+            self.cmd_pub.publish(Twist())
+            self.prev_cmd = Twist()
+            return
+
+        # RELOC-LOSS stop: map localization stale -> do not drive blind on a stale map-frame path.
+        if self.last_reloc_mono is not None and (now - self.last_reloc_mono) > self.reloc_stale_stop_s:
             self.cmd_pub.publish(Twist())
             self.prev_cmd = Twist()
             return
@@ -102,17 +170,18 @@ class CmdVelControlNode(Node):
             target_cmd.linear.x *= 0.3
             target_cmd.angular.z *= 0.5
 
+        # Reactive forward E-STOP (reloc-independent): wall close ahead -> zero forward, allow turning.
+        if (self.front_clear is not None and (now - self.front_clear_time) < 0.8
+                and self.front_clear < self.front_stop_dist):
+            target_cmd.linear.x = min(target_cmd.linear.x, 0.0)
+
         out = Twist()
         out.linear.y = 0.0
 
         # Reverse is a predefined planner vocabulary: straight back at fixed speed.
         # Do not smooth or re-lock it here; just pass it through while stale/paused guards still work.
         if target_cmd.linear.x < 0.0:
-            out.linear.x = target_cmd.linear.x
-            out.angular.z = 0.0
-            self.cmd_pub.publish(out)
-            self.prev_cmd = out
-            return
+            target_cmd.linear.x = 0.0  # SAFE-CAP: never reverse (fall through to forward/turn handling)
 
         # Forward/turning commands still get acceleration limiting and robot minimum-speed locks.
         max_dv = self.max_linear_acc * dt
@@ -179,32 +248,38 @@ class CmdVelControlNode(Node):
         angular_velocity_vec = r.as_rotvec() / dt
 
         raw_vx = float(linear_velocity_vec[0])
-        if raw_vx < 0.0:
-            vx = -self.fixed_reverse_speed
-        else:
-            vx = float(np.clip(raw_vx, 0.0, 0.5))
+        # SAFE-CAP: forbid reverse. If the target is behind, rotate to face it (the force-turn gate
+        # below fires on the large heading error) instead of backing up blindly.
+        vx = float(np.clip(raw_vx, 0.0, 0.5))
         vy = 0.0
         vyaw = np.clip(angular_velocity_vec[2], -self.max_angular_speed, self.max_angular_speed)
-        is_backward_segment = raw_vx < 0.0
-        if is_backward_segment:
-            vyaw = 0.0
+        is_backward_segment = False
 
         # Hack: if path first segment points >80 deg away from robot heading,
         # force an in-place turn. Skip explicit backward segments because reverse
         # naturally has heading_err close to +/-pi.
+        # ARC toward the goal instead of spin-then-go: keep forward progress while gently correcting
+        # heading. Only spin in place when the goal is nearly BEHIND. Robust to the slow (~1Hz) laggy
+        # feedback that made pure rotate-in-place overshoot and hunt forever.
         if (not is_backward_segment) and abs(heading_err) > self.force_turn_heading_threshold:
             vx = 0.0
             vyaw = float(np.clip(heading_err, -self.max_angular_speed, self.max_angular_speed))
-        # Minimal rotate-first gate: apply only for forward motion.
-        elif vx > 0.0 and abs(heading_err) > 0.45:
-            vx = 0.0
-            vyaw = float(np.clip(1.6 * heading_err, -0.6, 0.6))
+        else:
+            vx = float(vx * max(0.0, np.cos(heading_err)))   # full speed aligned -> 0 near 90deg
+            vyaw = float(np.clip(1.5 * heading_err, -self.max_angular_speed, self.max_angular_speed))
+            if abs(heading_err) < np.deg2rad(8.0):           # deadband: stop hunting tiny heading errors
+                vyaw = 0.0
 
         vyaw = float(np.clip(vyaw, -self.max_angular_speed, self.max_angular_speed))
 
         # Store the latest target command directly. Smoothing is intentionally kept
         # only in cmd_timer_callback via acceleration limiting, so planner/control
         # behavior stays easy to reason about during tuning.
+        if self.goal_dist is not None and (time.monotonic() - self.goal_dist_time) < 1.0:
+            if self.goal_dist < self.arrival_radius:
+                vx = 0.0; vyaw = 0.0   # arrived: stop
+            else:
+                vx = float(min(vx, self.arrival_gain * (self.goal_dist - self.arrival_radius)))
         self.latest_cmd.linear.x = float(vx)
         self.latest_cmd.linear.y = float(vy)
         self.latest_cmd.angular.z = float(vyaw)

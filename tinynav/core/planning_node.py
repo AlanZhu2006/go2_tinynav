@@ -8,6 +8,50 @@ from scipy.ndimage import distance_transform_edt, binary_dilation
 from dataclasses import dataclass
 from numba import njit
 import message_filters
+from scipy.spatial.transform import Rotation as _Rot
+
+
+def _rot_align_to_z(n):
+    """3x3 rotation mapping unit vector n -> +Z (world up)."""
+    n = np.asarray(n, float); n = n / np.linalg.norm(n); z = np.array([0.0, 0.0, 1.0])
+    v = np.cross(n, z); c = float(n @ z)
+    if np.linalg.norm(v) < 1e-8:
+        return np.eye(3) if c > 0 else np.diag([1.0, -1.0, -1.0])
+    vx = np.array([[0, -v[2], v[1]], [v[2], 0, -v[0]], [-v[1], v[0], 0]])
+    return np.eye(3) + vx + vx @ vx * (1.0 / (1.0 + c))
+
+
+def _estimate_floor_normal_world(depth, T, fx, fy, cx, cy):
+    """RANSAC the floor plane from a depth frame; return its normal in WORLD coords (oriented up), or None."""
+    h, w = depth.shape
+    us, vs = np.meshgrid(np.arange(0, w, 8), np.arange(0, h, 8))
+    us = us.ravel(); vs = vs.ravel(); d = depth[vs, us]
+    m = (d > 0.2) & (d < 5.0)
+    if int(m.sum()) < 200:
+        return None
+    us = us[m].astype(np.float64); vs = vs[m].astype(np.float64); d = d[m].astype(np.float64)
+    cam = np.stack([(us - cx) * d / fx, (vs - cy) * d / fy, d], 1)
+    world = cam @ T[:3, :3].T + T[:3, 3]
+    rng = np.random.RandomState(0); best = None; bestc = 0
+    for _ in range(200):
+        p = world[rng.choice(len(world), 3, replace=False)]
+        nrm = np.cross(p[1] - p[0], p[2] - p[0]); nn = np.linalg.norm(nrm)
+        if nn < 1e-6:
+            continue
+        nrm = nrm / nn; off = -nrm @ p[0]
+        c = int((np.abs(world @ nrm + off) < 0.05).sum())
+        if c > bestc:
+            bestc = c; best = (nrm, off)
+    if best is None or bestc < len(world) * 0.25:
+        return None
+    nrm, off = best
+    inl = world[np.abs(world @ nrm + off) < 0.05]; cc = inl.mean(0)
+    _, _, vt = np.linalg.svd(inl - cc); nrm = vt[-1]
+    cam_up_world = T[:3, :3] @ np.array([0.0, -1.0, 0.0])   # camera up (-Y) in world, to orient the normal
+    if nrm @ cam_up_world < 0:
+        nrm = -nrm
+    return nrm
+
 from rclpy.time import Time
 from sensor_msgs.msg import PointCloud2, PointCloud
 from geometry_msgs.msg import PoseStamped, Point32
@@ -381,6 +425,7 @@ class PlanningNode(Node):
         self.baseline = None
         self.last_T = None
         self.last_param = (0.0, 0.0) # acc and gyro
+        self.G_gravity = None  # VO-frame -> Z-up gravity rotation (estimated once from the floor)
         self.obstacle_config = ObstacleConfig()
         self.stamp = None
         self.current_pose = None  # Store the latest pose from odometry
@@ -547,6 +592,17 @@ class PlanningNode(Node):
             depth = self.bridge.imgmsg_to_cv2(depth_msg, desired_encoding='32FC1')
             stamp = Time.from_msg(odom_msg.header.stamp).nanoseconds / 1e9
             T,_ = msg2np(odom_msg)
+            # GRAVITY-ALIGN the planner world (VO frame is optical: Z=forward, not up). Estimate the floor
+            # normal once, rotate the pose into a Z-up frame; occupancy/obstacle-map/trajectories/goal then
+            # all live in a correct Z-up world. The controller uses only relative path transforms, so it is
+            # invariant to this global rotation.
+            if self.G_gravity is None:
+                _n = _estimate_floor_normal_world(depth, T, self.K[0, 0], self.K[1, 1], self.K[0, 2], self.K[1, 2])
+                if _n is not None:
+                    self.G_gravity = np.eye(4); self.G_gravity[:3, :3] = _rot_align_to_z(_n)
+                    self.get_logger().info(f"[planner] gravity-aligned; floor normal(world)={np.round(_n, 3)}")
+            if self.G_gravity is not None:
+                T = self.G_gravity @ T
             if self.last_T is None:
                 self.last_T = T.copy()
                 self.smoothed_velocity = 0.0
@@ -588,7 +644,7 @@ class PlanningNode(Node):
 
         with Timer(name='traj gen', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             init_p = self.camera_to_robot_center(T)
-            init_q = np.array([odom_msg.pose.pose.orientation.x, odom_msg.pose.pose.orientation.y, odom_msg.pose.pose.orientation.z, odom_msg.pose.pose.orientation.w])
+            init_q = _Rot.from_matrix(T[:3, :3]).as_quat()  # aligned camera orientation
             trajectories, params = generate_trajectory_library_3d(init_p=init_p, init_q=init_q)
             vocab_trajs, vocab_params = generate_predefined_trajectory_vocabularies(init_p=init_p, init_q=init_q)
             trajectories = np.concatenate([trajectories, vocab_trajs], axis=0)
@@ -624,7 +680,8 @@ class PlanningNode(Node):
                 return score * 100000 + 100 * dist + 10 * abs(self.last_param[0] - param[0]) + 10 * abs(self.last_param[1] - param[1]) + reverse_gate_penalty
 
             top_k = 1
-            top_indices = np.argsort(np.array([cost_function(trajectories[i], params[i], scores[i], self.target_pose) for i in range(len(trajectories))]), kind='stable')[:top_k]
+            _target_aligned = (self.G_gravity[:3, :3] @ self.target_pose) if (self.target_pose is not None and self.G_gravity is not None) else self.target_pose
+            top_indices = np.argsort(np.array([cost_function(trajectories[i], params[i], scores[i], _target_aligned) for i in range(len(trajectories))]), kind='stable')[:top_k]
             self.last_param = params[top_indices[0]]
 
             # path

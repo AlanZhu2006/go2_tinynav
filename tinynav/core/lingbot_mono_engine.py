@@ -21,6 +21,7 @@ Interface mirrors StereoEngineTRT.infer(left, right, baseline, fx) so it slots i
 The `right`/`baseline` args are accepted and ignored (mono). Returns (disparity=None, depth).
 """
 import asyncio, pickle, socket, struct, numpy as np
+import cv2
 
 
 def _send(sock, obj):
@@ -62,11 +63,16 @@ class LingBotMonoEngine:
     def _infer_sync(self, img, fx=None):
         # img: HxW (mono8) or HxWx3. LingBot wants RGB; replicate gray to 3ch if needed.
         rgb = img if img.ndim == 3 else np.repeat(img[..., None], 3, axis=2)
-        msg = {"rgb": np.ascontiguousarray(rgb.astype(np.uint8))}
+        _bgr = cv2.cvtColor(np.ascontiguousarray(rgb.astype(np.uint8)), cv2.COLOR_RGB2BGR)
+        _ok, _enc = cv2.imencode(".jpg", _bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 90])
+        msg = {"jpg": _enc.tobytes()}   # ~1.2MB raw -> ~80KB over the wire
         if fx is not None:
             msg["f_px"] = float(fx)
         _send(self.sock, msg)
         out = _recv(self.sock)
+        if out.get("warming"):
+            h, w = rgb.shape[:2]
+            return np.zeros((h, w), np.float32), None, None   # scale anchor still priming; VO skips zero-depth kpts
         depth = out["depth"].astype(np.float32) * self.scale
         # out also carries "reliability" (depth_conf-gated, in [0,1]) — TinyNav doesn't use it yet,
         # but the planning/costmap layer can read it via a side channel to gate free-space (the 14-24x win).
