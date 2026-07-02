@@ -26,7 +26,10 @@ Keyboard teleop publishing geometry_msgs/Twist.
 
 
 class KeyboardCmdVel(Node):
-    def __init__(self, topic: str, linear_speed: float, angular_speed: float, rate_hz: float):
+    def __init__(self, topic: str, linear_speed: float, angular_speed: float, rate_hz: float,
+                 max_linear: float = 1.0, max_angular: float = 2.0):
+        self.max_linear = max_linear
+        self.max_angular = max_angular
         super().__init__("keyboard_cmd_vel")
         self.pub = self.create_publisher(Twist, topic, 10)
         self.topic = topic
@@ -63,8 +66,8 @@ class KeyboardCmdVel(Node):
         elif key in (" ", "x"):
             pass
         elif key in ("+", "="):
-            self.linear_speed = min(1.0, self.linear_speed + 0.05)
-            self.angular_speed = min(2.0, self.angular_speed + 0.1)
+            self.linear_speed = min(self.max_linear, self.linear_speed + 0.05)
+            self.angular_speed = min(self.max_angular, self.angular_speed + 0.1)
             self.print_status()
             return
         elif key in ("-", "_"):
@@ -107,11 +110,13 @@ def main() -> int:
     parser.add_argument("--linear-speed", type=float, default=0.20)
     parser.add_argument("--angular-speed", type=float, default=0.45)
     parser.add_argument("--rate", type=float, default=20.0)
+    parser.add_argument("--max-linear", type=float, default=1.0, help="HARD cap; +/= cannot exceed")
+    parser.add_argument("--max-angular", type=float, default=2.0, help="HARD cap; +/= cannot exceed")
     args = parser.parse_args()
 
     old_settings = termios.tcgetattr(sys.stdin)
     rclpy.init()
-    node = KeyboardCmdVel(args.topic, args.linear_speed, args.angular_speed, args.rate)
+    node = KeyboardCmdVel(args.topic, min(args.linear_speed, args.max_linear), min(args.angular_speed, args.max_angular), args.rate, max_linear=args.max_linear, max_angular=args.max_angular)
 
     print(HELP)
     node.print_status()
