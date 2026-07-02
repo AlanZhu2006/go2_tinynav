@@ -106,6 +106,8 @@ class PerceptionNode(Node):
         scale = float(os.environ.get("LINGBOT_SCALE", scale_cfg.get("value", 1.0)))
         self.depth_engine = LingBotMonoEngine(host=host, port=port, scale=scale)
         self.logger.info("LingBotMonoEngine connected to %s:%d with scale %.6f", host, port, scale)
+        self.min_process_interval = max(0.0, float(os.environ.get("LINGBOT_NAV_MIN_INTERVAL", "0.10")))
+        self.logger.info("Minimum perception interval: %.3fs", self.min_process_interval)
         # intrinsic
         self.baseline = None
         self.K = None
@@ -177,7 +179,7 @@ class PerceptionNode(Node):
 
     def image_callback(self, left_msg):
         image_timestamp = stamp2second(left_msg.header.stamp)
-        if image_timestamp - self.last_processed_timestamp < 0.1333:
+        if image_timestamp - self.last_processed_timestamp < self.min_process_interval:
             return
 
         self.last_processed_timestamp = image_timestamp

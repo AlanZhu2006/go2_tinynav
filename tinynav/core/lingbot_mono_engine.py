@@ -56,6 +56,7 @@ class LingBotMonoEngine:
         a commanded-motion bootstrap, or camera-height; or 1.0 if the server already returns metric."""
         self.scale = float(scale)
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         self.sock.connect((host, port))
         if reset:
             _send(self.sock, {"reset": True}); _recv(self.sock)
@@ -73,7 +74,14 @@ class LingBotMonoEngine:
         if out.get("warming"):
             h, w = rgb.shape[:2]
             return np.zeros((h, w), np.float32), None, None   # scale anchor still priming; VO skips zero-depth kpts
-        depth = out["depth"].astype(np.float32) * self.scale
+        if "depth_png" in out:
+            enc = np.frombuffer(out["depth_png"], dtype=np.uint8)
+            depth = cv2.imdecode(enc, cv2.IMREAD_UNCHANGED).astype(np.float32) * float(out.get("depth_scale", 0.001))
+        else:
+            depth = out["depth"].astype(np.float32)
+        if depth.shape[:2] != rgb.shape[:2]:
+            depth = cv2.resize(depth, (rgb.shape[1], rgb.shape[0]), interpolation=cv2.INTER_NEAREST)
+        depth = depth.astype(np.float32) * self.scale
         # out also carries "reliability" (depth_conf-gated, in [0,1]) — TinyNav doesn't use it yet,
         # but the planning/costmap layer can read it via a side channel to gate free-space (the 14-24x win).
         return depth, out.get("reliability"), out.get("c2w")
