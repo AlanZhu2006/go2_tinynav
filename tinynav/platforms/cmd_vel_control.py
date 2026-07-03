@@ -146,8 +146,17 @@ class CmdVelControlNode(Node):
         now = time.monotonic()
         dt = max(1e-3, now - self.last_cmd_pub_time)
         self.last_cmd_pub_time = now
+        # SIL gate telemetry
+        if not hasattr(self, "_gate_n"):
+            self._gate_n = {}; self._gate_t0 = now
+        def _gate(name):
+            self._gate_n[name] = self._gate_n.get(name, 0) + 1
+        if now - self._gate_t0 > 15.0:
+            print(f"[gatedbg] {self._gate_n}", flush=True)
+            self._gate_n = {}; self._gate_t0 = now
 
         if self._paused:
+            _gate("paused")
             self.cmd_pub.publish(Twist())
             self.prev_cmd = Twist()
             return
@@ -155,6 +164,7 @@ class CmdVelControlNode(Node):
         # SAFE-CAP: perception stalled or reloc jumped -> do not drive on a stale/jumping pose.
         if (self.last_pose_mono is None or (now - self.last_pose_mono) > self.pose_stale_stop_s
                 or now < self.reloc_freeze_until):
+            _gate("pose_stale_or_jump")
             self.cmd_pub.publish(Twist())
             self.prev_cmd = Twist()
             return
@@ -162,6 +172,7 @@ class CmdVelControlNode(Node):
         # RELOC-LOSS stop: map localization stale -> do not drive blind on a stale map-frame path.
         reloc_stop = self.reloc_stale_stop_s if self.reloc_period_ema is None else max(self.reloc_stale_stop_s, 2.5 * self.reloc_period_ema)
         if self.last_reloc_mono is not None and (now - self.last_reloc_mono) > reloc_stop:
+            _gate("reloc_stale")
             self.cmd_pub.publish(Twist())
             self.prev_cmd = Twist()
             return
@@ -174,9 +185,11 @@ class CmdVelControlNode(Node):
         target_cmd.linear.x = self.latest_cmd.linear.x
         target_cmd.angular.z = self.latest_cmd.angular.z
         if age > stale_stop_s:
+            _gate("path_stale_stop")
             target_cmd.linear.x = 0.0
             target_cmd.angular.z = 0.0
         elif age > stale_slow_s:
+            _gate("path_stale_slow")
             target_cmd.linear.x *= 0.3
             target_cmd.angular.z *= 0.5
 

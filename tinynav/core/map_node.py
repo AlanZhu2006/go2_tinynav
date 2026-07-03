@@ -546,6 +546,12 @@ class MapNode(Node):
         return dt, dr
 
     def keyframe_relocalization(self, timestamp, image:np.ndarray) -> tuple[bool, np.ndarray]:
+        # GPU-burst rate limit: reloc more often than ~0.7Hz adds no information (robot moves
+        # <0.5m between attempts) but starves perception on the shared GPU.
+        now_mono = time.monotonic()
+        if getattr(self, "_last_reloc_attempt", 0.0) + 1.5 > now_mono:
+            return False, np.eye(4)
+        self._last_reloc_attempt = now_mono
         features = asyncio.run(self.super_point_extractor.infer(image))
         res, pose_in_camera, pose_cov_weight = self.relocalize_with_depth(image, features, self.K)
         if not res:
