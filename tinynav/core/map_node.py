@@ -137,8 +137,11 @@ def search_within_sdf_map( start:tuple, goal:tuple, sdf_map:np.ndarray, occupanc
 
     while True:
         queue_idx = -1
-        for i, q in enumerate(open_heaps):
-            if len(q) > 0:
+        # WIDEST bucket first — the shipped loop drained bucket 0 (sdf<0.2m, obstacle-hugging)
+        # first, i.e. it PREFERRED the narrowest corridors (regression: exp81 — synthetic
+        # two-route world, mean path clearance 0.13m with a wide corridor available).
+        for i in range(len(open_heaps) - 1, -1, -1):
+            if len(open_heaps[i]) > 0:
                 queue_idx = i
                 break
         if queue_idx == -1:
@@ -200,6 +203,10 @@ class MapNode(Node):
         self.keyframe_odom_sub = Subscriber(self, Odometry, '/slam/keyframe_odom')
         self.continuous_odom_sub = self.create_subscription(Odometry, '/slam/odometry', self.continuous_odom_callback, 100)
         self.pois_sub = self.create_subscription(String, '/mapping/cmd_pois', self.pois_callback, 10)
+        # LOCAL->GLOBAL no-go feedback: blocked carrots (odom frame) become temporary obstacles
+        # in the global path search (60s TTL; cleared on POI advance). Sim E4: stall 50%->0%.
+        self.route_blocked_sub = self.create_subscription(Odometry, '/planning/route_blocked', self.route_blocked_callback, 10)
+        self.nogo_cells = {}      # (ix, iy) -> wall-clock stamp
 
         # pubs
         self.pose_graph_trajectory_pub = self.create_publisher(Path, "/mapping/pose_graph_trajectory", 10)
@@ -274,6 +281,32 @@ class MapNode(Node):
         self.tf_broadcaster = TransformBroadcaster(self)
 
         self._save_completed = False
+
+    def route_blocked_callback(self, msg):
+        if self.T_from_map_to_odom is None:
+            return
+        p_odom = np.array([msg.pose.pose.position.x, msg.pose.pose.position.y, msg.pose.pose.position.z, 1.0])
+        p_map = np.linalg.inv(self.T_from_map_to_odom) @ p_odom
+        origin = self.occupancy_map_meta[:3]; res = float(self.occupancy_map_meta[3])
+        cx = int((p_map[0] - origin[0]) / res); cy = int((p_map[1] - origin[1]) / res)
+        now = time.time()
+        R = max(1, int(0.3 / res))
+        for di in range(-R, R + 1):
+            for dj in range(-R, R + 1):
+                self.nogo_cells[(cx + di, cy + dj)] = now
+        self.get_logger().info(f"route_blocked: no-go added around map cell ({cx},{cy}), total {len(self.nogo_cells)}")
+
+    def occupancy_with_nogo(self):
+        """Occupancy with fresh no-go columns forced occupied (TTL 60s)."""
+        now = time.time()
+        self.nogo_cells = {c: t for c, t in self.nogo_cells.items() if now - t < 60.0}
+        if not self.nogo_cells:
+            return self.occupancy_map
+        occ = self.occupancy_map.copy()
+        for (ix, iy) in self.nogo_cells:
+            if 0 <= ix < occ.shape[0] and 0 <= iy < occ.shape[1]:
+                occ[ix, iy, :] = 2
+        return occ
 
     def pois_callback(self, msg: String):
         self.get_logger().info("Received POIs from planner: " + msg.data)
@@ -681,6 +714,7 @@ class MapNode(Node):
                     })
                     self.nav_progress_pub.publish(arrived_msg)
                 self.poi_index += 1
+                self.nogo_cells.clear()   # new leg: forget local blockages
                 self._leg_initial_length = None
                 self._leg_start_time = None
                 dummy_pose = np.eye(4)
@@ -815,12 +849,13 @@ class MapNode(Node):
             or poi_goal_idx[2] >= self.occupancy_map.shape[2]
         ):
             return None 
-        sdf_start_path = search_close_to_sdf_map(start_idx, self.sdf_map, self.occupancy_map, 0.2)
-        sdf_goal_path = search_close_to_sdf_map(poi_goal_idx, self.sdf_map, self.occupancy_map, 0.2)
+        occ_eff = self.occupancy_with_nogo()
+        sdf_start_path = search_close_to_sdf_map(start_idx, self.sdf_map, occ_eff, 0.2)
+        sdf_goal_path = search_close_to_sdf_map(poi_goal_idx, self.sdf_map, occ_eff, 0.2)
 
         sdf_start_sdf = sdf_start_path[-1]
         sdf_goal_sdf = sdf_goal_path[-1]
-        path_sdf = search_within_sdf_map(sdf_start_sdf, sdf_goal_sdf, self.sdf_map, self.occupancy_map, resolution)
+        path_sdf = search_within_sdf_map(sdf_start_sdf, sdf_goal_sdf, self.sdf_map, occ_eff, resolution)
         if len(path_sdf) == 0:
             self.get_logger().warning(
                 f"search_within_sdf_map returned empty path: start_idx={tuple(sdf_start_sdf)}, goal_idx={tuple(sdf_goal_sdf)}"

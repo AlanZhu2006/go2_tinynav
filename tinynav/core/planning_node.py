@@ -437,6 +437,10 @@ class PlanningNode(Node):
 
         self.create_subscription(Odometry, '/control/target_pose', self.target_pose_callback, 10)
         self.target_pose = None
+        # LOCAL->GLOBAL feedback (sim E4): when the footprint cannot progress toward the carrot for
+        # ~20 cycles, tell map_node so its global path reroutes instead of re-sending us here forever.
+        self.route_blocked_pub = self.create_publisher(Odometry, '/planning/route_blocked', 10)
+        self._blocked_run = 0
 
         self.poi_change_sub = self.create_subscription(Odometry, "/mapping/poi_change", self.poi_change_callback, 10)
 
@@ -686,6 +690,17 @@ class PlanningNode(Node):
             _target_aligned = (self.G_gravity[:3, :3] @ self.target_pose) if (self.target_pose is not None and self.G_gravity is not None) else self.target_pose
             top_indices = np.argsort(np.array([cost_function(trajectories[i], params[i], scores[i], _target_aligned) for i in range(len(trajectories))]), kind='stable')[:top_k]
             self.last_param = params[top_indices[0]]
+
+            # sustained blockage detector: target exists but the best command is ~standstill
+            if self.target_pose is not None and abs(self.last_param[0]) < 0.03 and abs(self.last_param[1]) < 0.05:
+                self._blocked_run += 1
+            else:
+                self._blocked_run = 0
+            if self._blocked_run >= 20:
+                blk = np.eye(4)
+                blk[:3, 3] = self.target_pose      # carrot position in ODOM frame
+                self.route_blocked_pub.publish(np2msg(blk, depth_msg.header.stamp, "odom", "camera"))
+                self._blocked_run = 0
 
             # path
             path = Path()
