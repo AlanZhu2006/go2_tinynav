@@ -116,39 +116,31 @@ def search_close_to_sdf_map(start_index:tuple, sdf_map:np.ndarray, occupancy_map
                             parent[neighbor] = current
     return []
 
-def search_within_sdf_map( start:tuple, goal:tuple, sdf_map:np.ndarray, occupancy_map:np.ndarray, resolution: float):
+def search_within_sdf_map(start:tuple, goal:tuple, sdf_map:np.ndarray, occupancy_map:np.ndarray, resolution: float):
+    """Greedy best-first with a CLEARANCE PENALTY (single heap).
+
+    Replaces the SDF-bucketed queues: the shipped bucket order preferred the NARROWEST cells
+    (exp81: hugged a 1-cell slot with a wide corridor available), and the naive widest-first
+    inversion floods every wide cell before touching narrower ones (25s stalls on 886k-voxel
+    grids -> map_node blocked -> reloc stale -> controller zeros: SIL finding 2026-07-04).
+    One heap with f = heuristic + W * narrowness keeps wide-corridor preference AND bounded
+    expansion.
+    """
     start = tuple(start.flatten()) if isinstance(start, np.ndarray) else start
     goal = tuple(goal.flatten()) if isinstance(goal, np.ndarray) else goal
-    sdf_bins = [0.2, 0.5, 1.0, 2.0, 5.0, 10.0]
+    W_SAFE = 0.5     # clearance below this is penalized
+    W_COST = 3.0     # meters of equivalent detour a fully-narrow cell costs
 
-    def get_queue_index(sdf_value: float) -> int:
-        for idx, threshold in enumerate(sdf_bins):
-            if sdf_value < threshold:
-                return idx
-        return len(sdf_bins)
+    def f_cost(cell):
+        c = float(sdf_map[cell])
+        pen = W_COST * max(0.0, (W_SAFE - c)) / W_SAFE
+        return heuristic(cell, goal, resolution) + pen
 
-    open_heaps = [[] for _ in range(len(sdf_bins) + 1)]
-    open_sets = [set() for _ in range(len(sdf_bins) + 1)]
-    start_queue_idx = get_queue_index(float(sdf_map[start]))
-    heapq.heappush(open_heaps[start_queue_idx], (heuristic(start, goal, resolution), start))
-    open_sets[start_queue_idx].add(start)
+    open_heap = [(f_cost(start), start)]
     parent = {start: start}
     visited = set()
-
-    while True:
-        queue_idx = -1
-        # WIDEST bucket first — the shipped loop drained bucket 0 (sdf<0.2m, obstacle-hugging)
-        # first, i.e. it PREFERRED the narrowest corridors (regression: exp81 — synthetic
-        # two-route world, mean path clearance 0.13m with a wide corridor available).
-        for i in range(len(open_heaps) - 1, -1, -1):
-            if len(open_heaps[i]) > 0:
-                queue_idx = i
-                break
-        if queue_idx == -1:
-            break
-
-        current_cost, current = heapq.heappop(open_heaps[queue_idx])
-        open_sets[queue_idx].remove(current)
+    while open_heap:
+        _, current = heapq.heappop(open_heap)
         if current in visited:
             continue
         visited.add(current)
@@ -163,19 +155,10 @@ def search_within_sdf_map( start:tuple, goal:tuple, sdf_map:np.ndarray, occupanc
                     if (0 <= neighbor[0] < sdf_map.shape[0] and
                             0 <= neighbor[1] < sdf_map.shape[1] and
                             0 <= neighbor[2] < sdf_map.shape[2]):
-                        if neighbor in visited or occupancy_map[neighbor] == 2:
+                        if neighbor in visited or neighbor in parent or occupancy_map[neighbor] == 2:
                             continue
-                        neighbor_sdf = float(sdf_map[neighbor])
-                        neighbor_queue_idx = get_queue_index(neighbor_sdf)
-                        if neighbor in open_sets[neighbor_queue_idx]:
-                            continue
-                        open_sets[neighbor_queue_idx].add(neighbor)
-                        heapq.heappush(
-                            open_heaps[neighbor_queue_idx],
-                            (heuristic(neighbor, goal, resolution), neighbor),
-                        )
-                        if neighbor not in parent:
-                            parent[neighbor] = current
+                        parent[neighbor] = current
+                        heapq.heappush(open_heap, (f_cost(neighbor), neighbor))
     return []
 
 class MapNode(Node):
