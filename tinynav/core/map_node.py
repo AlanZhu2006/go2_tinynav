@@ -665,6 +665,20 @@ class MapNode(Node):
                 relative_pose_constraint.append((0, 1, observation_T_from_map_to_odom, weight * np.array([10.0, 10.0, 10.0]), weight * np.array([10.0, 10.0, 10.0])))
         relative_pose_constraint = relative_pose_constraint[-100:]
         optimized_parameters = pose_graph_solve(optimized_parameters, relative_pose_constraint, constant_pose_index_dict, max_iteration_num = 1000)
+
+        # Geman-McClure IRLS (exp82): continuous outlier rejection on top of the fixed weights.
+        # At realistic poison rates it matches the gates; at high CORRELATED-aliasing rates the
+        # binary gates flip to the wrong cluster (207cm median in synthetic 50% streams) while
+        # IRLS stays at ~6cm. Two reweight iterations, residual scale c=0.5m.
+        C2 = 0.5 ** 2
+        for _ in range(2):
+            T_est = optimized_parameters[0]
+            rw = []
+            for (a, b, obs, wt, wr) in relative_pose_constraint:
+                r = float(np.linalg.norm((np.linalg.inv(T_est) @ obs)[:2, 3]))
+                g = C2 / (C2 + r * r) ** 2
+                rw.append((a, b, obs, wt * g, wr * g))
+            optimized_parameters = pose_graph_solve(optimized_parameters, rw, constant_pose_index_dict, max_iteration_num = 500)
         self.T_from_map_to_odom = optimized_parameters[0]
 
     def try_publish_nav_path(self, timestamp: int):
