@@ -197,7 +197,10 @@ def run_raycasting_loopy(depth_image, T_cam_to_world, grid_shape, fx, fy, cx, cy
 class ObstacleConfig:
     robot_z_bottom: float = -0.4
     robot_z_top: float = 0.4
-    occ_threshold: float = 0.1
+    # 0.05, was 0.1: a SINGLE raycast hit lands at exactly 0.1 and `> 0.1` excludes it — walls
+    # needed 2 confirmations (0.6s at 3.4Hz) before existing. Sim task D: this confirmation
+    # latency stacks with pipeline latency into the front-stop margin.
+    occ_threshold: float = 0.05
     min_wall_span_m: float = 0.2
     dilation_cells: int = 2
 
