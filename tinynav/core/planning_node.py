@@ -689,6 +689,14 @@ class PlanningNode(Node):
             top_k = 1
             _target_aligned = (self.G_gravity[:3, :3] @ self.target_pose) if (self.target_pose is not None and self.G_gravity is not None) else self.target_pose
             top_indices = np.argsort(np.array([cost_function(trajectories[i], params[i], scores[i], _target_aligned) for i in range(len(trajectories))]), kind='stable')[:top_k]
+            # SIL debug (remove after diagnosis)
+            self._dbg_n = getattr(self, "_dbg_n", 0) + 1
+            if self._dbg_n % 10 == 0:
+                bi = top_indices[0]
+                n_inf = int(np.sum(np.isinf(scores)))
+                print(f"[plandbg] target={None if _target_aligned is None else np.round(_target_aligned,2).tolist()} "
+                      f"front_clear={front_clearance:.2f} rev_gate={front_clearance <= enter_threshold} "
+                      f"best_param={np.round(params[bi],3).tolist()} best_score={scores[bi]:.3f} inf_trajs={n_inf}/{len(scores)}", flush=True)
             self.last_param = params[top_indices[0]]
 
             # sustained blockage detector: target exists but the best command is ~standstill

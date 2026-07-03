@@ -77,7 +77,11 @@ class CmdVelControlNode(Node):
         self.create_subscription(Float32, '/control/goal_distance', self._goal_dist_cb, 10)
         # RELOC-LOSS stop: if map localization goes stale, do not drive blind on a stale map-frame path.
         self.last_reloc_mono = None
+        # Adaptive floor: reloc arrives per KEYFRAME (3s when slow/static), so a fixed 4.0s gate
+        # sits ON the cadence boundary — any borderline reloc miss freezes the robot until the
+        # next hit (SIL 2026-07-04: drive-freeze chatter, the real dog's stop-and-go signature).
         self.reloc_stale_stop_s = 4.0
+        self.reloc_period_ema = None
         self.create_subscription(Odometry, '/map/relocalization', self._reloc_cb, 10)
         # Reactive forward E-STOP from LIVE depth (reloc-independent): stop if a wall is close ahead.
         self._bridge = CvBridge()
@@ -105,7 +109,11 @@ class CmdVelControlNode(Node):
         self.goal_dist = float(msg.data); self.goal_dist_time = time.monotonic()
 
     def _reloc_cb(self, msg):
-        self.last_reloc_mono = time.monotonic()
+        now = time.monotonic()
+        if self.last_reloc_mono is not None:
+            period = now - self.last_reloc_mono
+            self.reloc_period_ema = period if self.reloc_period_ema is None else 0.8 * self.reloc_period_ema + 0.2 * period
+        self.last_reloc_mono = now
 
     def _depth_cb(self, msg):
         try:
@@ -152,7 +160,8 @@ class CmdVelControlNode(Node):
             return
 
         # RELOC-LOSS stop: map localization stale -> do not drive blind on a stale map-frame path.
-        if self.last_reloc_mono is not None and (now - self.last_reloc_mono) > self.reloc_stale_stop_s:
+        reloc_stop = self.reloc_stale_stop_s if self.reloc_period_ema is None else max(self.reloc_stale_stop_s, 2.5 * self.reloc_period_ema)
+        if self.last_reloc_mono is not None and (now - self.last_reloc_mono) > reloc_stop:
             self.cmd_pub.publish(Twist())
             self.prev_cmd = Twist()
             return
