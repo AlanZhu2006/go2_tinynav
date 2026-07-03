@@ -488,20 +488,27 @@ class MapNode(Node):
             reference_matched_keypoints, keyframe_matched_keypoints, matches = self.match_keypoints(reference_features, keyframe_features)
             # 30, was 50: carpet-heavy scenes at 848x480 give ~20-60 SuperPoint matches; PnP
             # min_inlier=20 remains the quality bar (20/30 = 67% inlier ratio required).
-            if len(matches) < 30:
-                print(f"not enough matched features to relocalize, {len(matches)} < 30")
+            if len(matches) < 15:
+                print(f"not enough matched features to relocalize, {len(matches)} < 15")
                 continue
 
             point_3d_in_world, inliers = self.keypoint_with_depth_to_3d(reference_matched_keypoints, reference_depth, reference_keyframe_pose, self.map_K)
             point_3d_in_world_list = point_3d_in_world[inliers]
             point_2d_in_keyframe_list = keyframe_matched_keypoints[inliers]
             point_count = len(point_2d_in_keyframe_list)
-            if point_count <= 25:
+            if point_count <= 12:
                 print(f"not enough landmarks to relocalize, {point_count}")
                 continue
             pnp_candidates.append((point_3d_in_world_list, point_2d_in_keyframe_list))
 
-        success, best_pose_in_camera, pose_cov_weight, _, _best_inl, _best_pc = rerank_by_pnp_inliers(pnp_candidates, self.map_K, min_point_count=25, min_inlier_count=35)  # 35, was 20: sim ROC (GT labels) — good relocs have inl p10=132, poison p50=32; 35 keeps 99.6% good, kills 55% of poison
+        # SOFT GATES (2026-07-04 SIL): real-data ROC showed front gates do not discriminate
+        # (poison inl p50=164); the real defenses are inlier RATIO + prior gate + 3-vote + IRLS.
+        # Low absolute gates widen the pose neighborhood reloc serves (borderline 15-29-match
+        # views 18cm off-route used to be permanently unlocalizable).
+        success, best_pose_in_camera, pose_cov_weight, _, _best_inl, _best_pc = rerank_by_pnp_inliers(pnp_candidates, self.map_K, min_point_count=12, min_inlier_count=12)  # 35, was 20: sim ROC (GT labels) — good relocs have inl p10=132, poison p50=32; 35 keeps 99.6% good, kills 55% of poison
+        if success and pose_cov_weight < 0.55:
+            print(f"reloc rejected by inlier-ratio gate ({pose_cov_weight:.2f} < 0.55)")
+            success = False
         if success:
             print(f"relocalization pose : {best_pose_in_camera}")
             return True, best_pose_in_camera, pose_cov_weight
