@@ -227,7 +227,7 @@ class MapNode(Node):
         self.loop_top_k = 1
 
         self.relocalization_threshold = 0.70  # was 0.85; PnP verifies retrievals so a high gate just blocks live reloc
-        self.relocalization_loop_top_k = 3
+        self.relocalization_loop_top_k = 10
 
         os.makedirs(f"{tinynav_db_path}/nav_temp", exist_ok=True)
         self.nav_temp_db = TinyNavDB(f"{tinynav_db_path}/nav_temp", is_scratch=True)
@@ -246,6 +246,8 @@ class MapNode(Node):
         self.relocalization_poses = {}
         self.relocalization_pose_weights = {}
         self.failed_relocalizations = []
+        self._reloc_reject_run = 0
+        self._reloc_init_buffer = []
 
         self.T_from_map_to_odom = None
 
@@ -463,20 +465,22 @@ class MapNode(Node):
             reference_keyframe_pose = self.map_poses[timestamp_in_map]
             reference_depth, _, reference_features, _, _ = self.db.get_depth_embedding_features_images(timestamp_in_map)
             reference_matched_keypoints, keyframe_matched_keypoints, matches = self.match_keypoints(reference_features, keyframe_features)
-            if len(matches) < 50:
-                print(f"not enough matched features to relocalize, {len(matches)} < 50")
+            # 30, was 50: carpet-heavy scenes at 848x480 give ~20-60 SuperPoint matches; PnP
+            # min_inlier=20 remains the quality bar (20/30 = 67% inlier ratio required).
+            if len(matches) < 30:
+                print(f"not enough matched features to relocalize, {len(matches)} < 30")
                 continue
 
             point_3d_in_world, inliers = self.keypoint_with_depth_to_3d(reference_matched_keypoints, reference_depth, reference_keyframe_pose, self.map_K)
             point_3d_in_world_list = point_3d_in_world[inliers]
             point_2d_in_keyframe_list = keyframe_matched_keypoints[inliers]
             point_count = len(point_2d_in_keyframe_list)
-            if point_count <= 80:
+            if point_count <= 25:
                 print(f"not enough landmarks to relocalize, {point_count}")
                 continue
             pnp_candidates.append((point_3d_in_world_list, point_2d_in_keyframe_list))
 
-        success, best_pose_in_camera, pose_cov_weight, _, _best_inl, _best_pc = rerank_by_pnp_inliers(pnp_candidates, self.map_K, min_inlier_count=20)
+        success, best_pose_in_camera, pose_cov_weight, _, _best_inl, _best_pc = rerank_by_pnp_inliers(pnp_candidates, self.map_K, min_point_count=25, min_inlier_count=35)  # 35, was 20: sim ROC (GT labels) — good relocs have inl p10=132, poison p50=32; 35 keeps 99.6% good, kills 55% of poison
         if success:
             print(f"relocalization pose : {best_pose_in_camera}")
             return True, best_pose_in_camera, pose_cov_weight
@@ -514,20 +518,66 @@ class MapNode(Node):
         return point_in_world, inliers
 
     @Timer(name="Relocalization loop", text="\n\n[{name}] Elapsed time: {milliseconds:.0f} ms")
+    def _se3_delta(self, A, B):
+        d = np.linalg.inv(A) @ B
+        dt = float(np.linalg.norm(d[:3, 3]))
+        dr = float(np.degrees(np.arccos(np.clip((np.trace(d[:3, :3]) - 1) / 2, -1.0, 1.0))))
+        return dt, dr
+
     def keyframe_relocalization(self, timestamp, image:np.ndarray) -> tuple[bool, np.ndarray]:
         features = asyncio.run(self.super_point_extractor.infer(image))
         res, pose_in_camera, pose_cov_weight = self.relocalize_with_depth(image, features, self.K)
-        if res:
-            # publish the relocalization pose for debug
-            pose_in_world = np.linalg.inv(pose_in_camera)
-            timestamp_ns = int(timestamp.sec * 1e9) + int(timestamp.nanosec)
-            self.relocation_pub.publish(np2msg(pose_in_world, timestamp, "world", "camera"))
-            self.relocalization_poses[timestamp_ns] = pose_in_world
-            self.relocalization_pose_weights[timestamp_ns] = pose_cov_weight
-            return True, pose_in_world
-        else:
+        if not res:
             self.failed_relocalizations.append(timestamp)
             return False, np.eye(4)
+        pose_in_world = np.linalg.inv(pose_in_camera)
+        timestamp_ns = int(timestamp.sec * 1e9) + int(timestamp.nanosec)
+
+        # POSE-PRIOR GATE. High-inlier PnP can be FALSE on repetitive texture (carpet): a single
+        # false reloc poisons T_from_map_to_odom and the robot drives on a wrong map pose
+        # (wall hit observed live 2026-07-03). Same medicine as the loop closer's prior gate:
+        # each reloc's implied map->odom transform must agree with the current one; cold start
+        # requires 3 consecutive relocs whose implied transforms mutually agree.
+        odom_pose = self.pose_graph_used_pose.get(timestamp_ns)
+        if odom_pose is not None:
+            implied_T = odom_pose @ np.linalg.inv(pose_in_world)
+            if self.T_from_map_to_odom is not None:
+                dt, dr = self._se3_delta(self.T_from_map_to_odom, implied_T)
+                if dt > 1.0 or dr > 30.0:  # 1.0, was 1.5: leaked poison sits at 1.5-2.0m (median 1.59) — half slid under 1.5; good relocs deviate < ~0.5m (VO drift between relocs)
+                    self._reloc_reject_run += 1
+                    print(f"reloc REJECTED by pose prior (dt={dt:.2f}m dr={dr:.0f}deg, run={self._reloc_reject_run})")
+                    # kidnapped-robot escape: sustained rejects mean the current transform is the
+                    # wrong one -> drop it and re-initialize via the consistency vote below.
+                    if self._reloc_reject_run >= 8:
+                        print("reloc: 8 consecutive prior rejects -> re-initializing localization")
+                        self.T_from_map_to_odom = None
+                        self.relocalization_poses.clear()
+                        self.relocalization_pose_weights.clear()
+                        self._reloc_reject_run = 0
+                    self.failed_relocalizations.append(timestamp)
+                    return False, np.eye(4)
+                self._reloc_reject_run = 0
+            else:
+                self._reloc_init_buffer.append((timestamp_ns, pose_in_world, pose_cov_weight, implied_T))
+                self._reloc_init_buffer = self._reloc_init_buffer[-3:]
+                consistent = len(self._reloc_init_buffer) == 3
+                for i in range(len(self._reloc_init_buffer) - 1):
+                    dt, dr = self._se3_delta(self._reloc_init_buffer[i][3], self._reloc_init_buffer[i + 1][3])
+                    if dt > 0.5 or dr > 10.0:
+                        consistent = False
+                if not consistent:
+                    print(f"reloc init: buffered {len(self._reloc_init_buffer)}/3, waiting for 3 mutually-consistent relocs")
+                    return False, np.eye(4)
+                for ts_b, pw_b, w_b, _ in self._reloc_init_buffer[:-1]:
+                    self.relocalization_poses[ts_b] = pw_b
+                    self.relocalization_pose_weights[ts_b] = w_b
+                self._reloc_init_buffer = []
+                print("reloc init: 3 consistent relocs -> localization initialized")
+
+        self.relocation_pub.publish(np2msg(pose_in_world, timestamp, "world", "camera"))
+        self.relocalization_poses[timestamp_ns] = pose_in_world
+        self.relocalization_pose_weights[timestamp_ns] = pose_cov_weight
+        return True, pose_in_world
 
     def save_relocalization_poses(self):
         if self._save_completed:

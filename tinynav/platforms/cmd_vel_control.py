@@ -44,6 +44,7 @@ class CmdVelControlNode(Node):
         self.max_linear_acc = 0.6   # m/s^2
         self.max_angular_acc = 0.8  # rad/s^2
         self.max_angular_speed = 0.70  # rad/s; match TinyNav/Go2 bridge yaw cap while keeping stale-pose guards.
+        self.max_inplace_turn_speed = 0.35
         self.planner_dt = 0.1       # trajectory dt in planning_node
         # planning_node publishes path with for j in range(..., step=10), so points are ~1.0 s apart.
         self.path_pose_stride = 10
@@ -263,7 +264,7 @@ class CmdVelControlNode(Node):
         # feedback that made pure rotate-in-place overshoot and hunt forever.
         if (not is_backward_segment) and abs(heading_err) > self.force_turn_heading_threshold:
             vx = 0.0
-            vyaw = float(np.clip(heading_err, -self.max_angular_speed, self.max_angular_speed))
+            vyaw = float(np.clip(heading_err, -self.max_inplace_turn_speed, self.max_inplace_turn_speed))
         else:
             vx = float(vx * max(0.0, np.cos(heading_err)))   # full speed aligned -> 0 near 90deg
             vyaw = float(np.clip(1.5 * heading_err, -self.max_angular_speed, self.max_angular_speed))

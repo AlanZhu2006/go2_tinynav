@@ -724,3 +724,23 @@ def main(args=None):
 
 if __name__ == '__main__':
     main()
+
+
+def carrot_guard(esdf, origin, res, robot_p, target_p, safety_radius, stop_margin=0.35):
+    """Poisoned-carrot guard (sim gauntlet task D, 2026-07-04): a wrong global pose puts the
+    carrot inside/behind a real wall and the trajectory cost then legally CREEPS the robot to
+    the wall (12/12 collisions with GT depth). Returns (target_valid, must_retreat):
+      - target_valid False: the carrot's cell sits inside an obstacle (ESDF < safety_radius)
+        -> publish STOP, do not chase it.
+      - must_retreat True: robot's own clearance < stop_margin -> only clearance-increasing
+        motion is allowed (turn/back off), never further approach.
+    """
+    import numpy as np
+    def esdf_at(p):
+        ix = int((p[0] - origin[0]) / res); iy = int((p[1] - origin[1]) / res)
+        if 0 <= ix < esdf.shape[0] and 0 <= iy < esdf.shape[1]:
+            return float(esdf[ix, iy])
+        return float("inf")
+    target_valid = esdf_at(target_p) >= safety_radius
+    must_retreat = esdf_at(robot_p) < stop_margin
+    return target_valid, must_retreat
