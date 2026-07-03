@@ -20,9 +20,9 @@ if len(sys.argv) > 2:                      # --single N: one episode per process
     SPEC = [SPEC[int(sys.argv[2])]]        # node restarts between episodes = clean VO per episode)
 OUT = "/tmp/claude-1000/sil_episode_results.json"
 GOAL_TOL = 0.6
-EP_TIMEOUT = 360.0
+EP_TIMEOUT = 900.0
 LOC_TIMEOUT = 240.0
-FREEZE_S = 90.0
+FREEZE_S = 240.0   # stop-and-go duty ~30%: bursts arrive, don't kill them early
 
 rclpy.init()
 node = Node("episode_suite")
