@@ -25,6 +25,8 @@ class Bridge(Node):
         self.pub_info = self.create_publisher(CameraInfo, "/camera/camera/color/camera_info", 5)
         self.pub_gt = self.create_publisher(PoseStamped, "/sim/gt_pose", 5)
         self.create_subscription(Twist, "/cmd_vel", self.cmd_cb, 5)
+        # teleport: position = habitat xyz, orientation.z = yaw (rad). For episode setup/scoring.
+        self.create_subscription(PoseStamped, "/sim/reset_pose", self.reset_cb, 5)
         self.vx = 0.0
         self.wz = 0.0
         self.dt = 1.0 / rate
@@ -44,6 +46,13 @@ class Bridge(Node):
         while len(buf) < n:
             buf += self.sock.recv(n - len(buf))
         return pickle.loads(buf)
+
+    def reset_cb(self, m):
+        pos = [m.pose.position.x, m.pose.position.y, m.pose.position.z]
+        yaw = float(m.pose.orientation.z)
+        r = self.rpc({"reset": {"pos": pos, "yaw": yaw}})
+        self.vx = 0.0; self.wz = 0.0
+        self.get_logger().info(f"teleported to {r['pos']} yaw {r['yaw']:.2f}")
 
     def cmd_cb(self, m):
         self.vx = float(m.linear.x)

@@ -316,7 +316,10 @@ class MapNode(Node):
             pois_dict = {}
             keys = sorted([int (key) for key in self.pois.keys()])
             for index, key in enumerate(keys):
-                pois_dict[index] = np.array(self.pois[str(key)]["position"])
+                entry = self.pois[str(key)]
+                # accept both {"position": [x,y,z]} and bare [x,y,z]
+                pos = entry["position"] if isinstance(entry, dict) else entry
+                pois_dict[index] = np.array(pos, dtype=float)
             self.pois = pois_dict
 
             if not self.pois:
@@ -335,8 +338,10 @@ class MapNode(Node):
             self._leg_start_time = None
             self._speed_estimate = None
             self.get_logger().info(f"Parsed POIs: {self.pois}")
-        except json.JSONDecodeError as e:
-            self.get_logger().error(f"Failed to parse POIs JSON: {e}")
+        except Exception as e:
+            # SIL finding 2026-07-04: a malformed POI message must not KILL the node (it took
+            # localization down with it). Fail loud, keep running.
+            self.get_logger().error(f"Failed to parse POIs payload: {e}")
             self.pois = {}
 
     def info_callback(self, msg:CameraInfo):
