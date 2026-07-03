@@ -16,6 +16,8 @@ from nav_msgs.msg import Odometry
 from std_msgs.msg import String
 
 SPEC = json.load(open(sys.argv[1]))["episodes"]
+if len(sys.argv) > 2:                      # --single N: one episode per process (host orchestrates
+    SPEC = [SPEC[int(sys.argv[2])]]        # node restarts between episodes = clean VO per episode)
 OUT = "/tmp/claude-1000/sil_episode_results.json"
 GOAL_TOL = 0.6
 EP_TIMEOUT = 360.0
