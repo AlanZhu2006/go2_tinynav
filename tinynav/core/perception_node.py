@@ -178,6 +178,16 @@ class PerceptionNode(Node):
             self.destroy_subscription(self.camerainfo_sub)
 
     def image_callback(self, left_msg):
+        # SIL watchdog (env-gated): distinguishes "callback not invoked" from "callback slow"
+        import os as _os, time as _time
+        if _os.environ.get("TINYNAV_CB_WATCHDOG") == "1":
+            now = _time.monotonic()
+            gap = now - getattr(self, "_wd_last_entry", now)
+            self._wd_last_entry = now
+            if gap > 1.0:
+                print(f"[cbwatchdog] callback INVOCATION gap {gap:.2f}s (executor/starvation side)", flush=True)
+            if not hasattr(self, "_wd_wrap"):
+                self._wd_wrap = True
         image_timestamp = stamp2second(left_msg.header.stamp)
         if image_timestamp - self.last_processed_timestamp < self.min_process_interval:
             return

@@ -8,7 +8,7 @@ for i in $(seq 0 $((N-1))); do
   echo ">>> episode $i: restarting perception+map for clean VO"
   docker exec sil bash -c "pkill -f 'tinynav.core.perception_nod[e]'; pkill -f 'tinynav.core.map_nod[e]'; true"
   sleep 3
-  docker exec -d sil bash -c "$ENVSET && python3 -m tinynav.core.perception_node > $LOG/sil_perception.log 2>&1"
+  docker exec -d sil bash -c "$ENVSET && TINYNAV_CB_WATCHDOG=1 python3 -m tinynav.core.perception_node > $LOG/sil_perception.log 2>&1"
   docker exec -d sil bash -c "$ENVSET && rm -rf $LOG/sil_navdb && mkdir -p $LOG/sil_navdb && python3 -m tinynav.core.map_node --tinynav_db_path $LOG/sil_navdb --tinynav_map_path /tmp/claude-1000/sim_gauntlet/map_sim8 > $LOG/sil_map.log 2>&1"
   sleep 10
   docker exec sil bash -c "$ENVSET && python3 sil/episode_suite.py $LOG/sil_episodes_spec.json $i" 2>&1 | grep -E "^ep|SUITE"
