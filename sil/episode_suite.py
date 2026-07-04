@@ -13,7 +13,7 @@ import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import PoseStamped, Twist
 from nav_msgs.msg import Odometry
-from std_msgs.msg import String
+from std_msgs.msg import String, Bool
 
 SPEC = json.load(open(sys.argv[1]))["episodes"]
 if len(sys.argv) > 2:                      # --single N: one episode per process (host orchestrates
@@ -37,6 +37,8 @@ def cmd_cb(m):
         state["cmd_nonzero"] += 1
 node.create_subscription(Twist, "/cmd_vel", cmd_cb, 10)
 pub_reset = node.create_publisher(PoseStamped, "/sim/reset_pose", 5)
+from rclpy.qos import QoSProfile, DurabilityPolicy
+pub_paused = node.create_publisher(Bool, "/nav/paused", QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
 pub_pois = node.create_publisher(String, "/mapping/cmd_pois", 5)
 
 def spin(sec):
@@ -53,15 +55,20 @@ for ep in SPEC:
     rp = PoseStamped()
     rp.pose.position.x, rp.pose.position.y, rp.pose.position.z = ep["start_h"]
     rp.pose.orientation.z = ep["yaw"]
+    # freeze the base during setup: stale planner carrots drove the robot around DURING the
+    # localization wait (motion predating goal-send = phantom instant successes). map_node
+    # publishes paused=False when the new goal arrives (existing handoff).
+    pub_paused.publish(Bool(data=True))
     pub_reset.publish(rp)
-    # verify the teleport actually landed before scoring anything (stale-GT race gave a
-    # phantom 2s "success" scored from the previous episode's final position)
-    want = np.array([ep["start_h"][0], ep["start_h"][2]])
+    # verify the teleport landed; gt topic convention is (x_h, -z_h)
+    want = np.array([ep["start_h"][0], -ep["start_h"][2]])
     for _ in range(10):
         spin(2)
-        if state["gt"] is not None and np.linalg.norm(np.array([state["gt"][0], -state["gt"][1]]) - np.array([want[0], -want[1]])) < 1.0:
+        if state["gt"] is not None and np.linalg.norm(np.array(state["gt"][:2]) - want) < 1.0:
             break
         pub_reset.publish(rp)
+    else:
+        print(f"ep{ep['ep']}: TELEPORT_NOT_CONFIRMED gt={state['gt']}", flush=True)
     # wait localization: fresh reloc messages arriving
     t0 = time.monotonic()
     ok_loc = False
