@@ -188,6 +188,18 @@ class PerceptionNode(Node):
                 print(f"[cbwatchdog] callback INVOCATION gap {gap:.2f}s (executor/starvation side)", flush=True)
             if not hasattr(self, "_wd_wrap"):
                 self._wd_wrap = True
+                self._wd_main_tid = __import__("threading").get_ident()
+                def _sampler():
+                    import sys, traceback, threading, time as t
+                    while True:
+                        t.sleep(0.2)
+                        if t.monotonic() - self._wd_last_entry > 1.0:
+                            frm = sys._current_frames().get(self._wd_main_tid)
+                            if frm is not None:
+                                stk = "".join(traceback.format_stack(frm)[-4:])
+                                print(f"[cbwatchdog] STALL main-thread stack:\n{stk}", flush=True)
+                            t.sleep(2.0)
+                __import__("threading").Thread(target=_sampler, daemon=True).start()
         image_timestamp = stamp2second(left_msg.header.stamp)
         if image_timestamp - self.last_processed_timestamp < self.min_process_interval:
             return
