@@ -21,7 +21,7 @@ for i in $(seq 0 $((N-1))); do
     pkill -9 -f 'tinynav.core.map_nod[e]' 2>/dev/null
     true"
   sleep 2
-  docker exec -d sil bash -c "$ENVSET && TINYNAV_CB_WATCHDOG=1 python3 -m tinynav.core.perception_node > $LOG/sil_perception.log 2>&1"
+  docker exec -d sil bash -c "$ENVSET && TINYNAV_CB_WATCHDOG=1 TINYNAV_IMG_QOS_RELIABLE=1 python3 -m tinynav.core.perception_node > $LOG/sil_perception.log 2>&1"
   docker exec -d sil bash -c "$ENVSET && rm -rf $LOG/sil_navdb && mkdir -p $LOG/sil_navdb && python3 -m tinynav.core.map_node --tinynav_db_path $LOG/sil_navdb --tinynav_map_path $MAPD > $LOG/sil_map.log 2>&1"
   sleep 10
   docker exec sil bash -c "$ENVSET && python3 sil/episode_suite.py $SPEC $i" 2>&1 | grep -E "^ep|SUITE"

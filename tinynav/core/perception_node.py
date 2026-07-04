@@ -119,7 +119,14 @@ class PerceptionNode(Node):
 
         self.bridge = CvBridge()
         self.tf_broadcaster = TransformBroadcaster(self)
-        qos_profile = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT, depth=500)
+        # BEST_EFFORT drops the WHOLE 1.2MB image when any UDP fragment (~800/frame) is lost —
+        # under load this starves the subscription for seconds (SIL forensics: executor idle in
+        # wait_for_ready_callbacks while a RELIABLE probe got 10Hz). Env-gated RELIABLE override;
+        # default preserved until the robot camera driver's publisher QoS is verified on-site.
+        if os.environ.get("TINYNAV_IMG_QOS_RELIABLE") == "1":
+            qos_profile = QoSProfile(reliability=ReliabilityPolicy.RELIABLE, depth=10)
+        else:
+            qos_profile = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT, depth=500)
 
         camera_cfg = mono_cfg.get("camera", {})
         self.color_topic = camera_cfg.get("color_topic", "/camera/camera/color/image_raw")
