@@ -740,7 +740,9 @@ class MapNode(Node):
                 self._arrival_count = 0
                 break
 
-        if self.poi_index >= len(self.pois):
+        # empty POI list = idle (goal message may be lost/late), NOT completion — declaring
+        # nav-done on 0 POIs latches /nav/paused and bricks the base for the whole mission
+        if len(self.pois) > 0 and self.poi_index >= len(self.pois):
             if not self._nav_completed:
                 self._nav_completed = True
                 self.get_logger().info("All POIs have been visited, nav done")

@@ -71,7 +71,11 @@ for ep in SPEC:
     spin(8)   # let 3-vote/IRLS settle
     # send goal
     g = ep["goal_map"]
-    pub_pois.publish(String(data=json.dumps({"0": {"position": g}})))
+    # resend: volatile pub + freshly-restarted map_node = the single goal message can be lost
+    # in the DDS rematch window (root cause of whole-episode paused freezes)
+    for _ in range(3):
+        pub_pois.publish(String(data=json.dumps({"0": {"position": g}})))
+        spin(4)
     goal_gt = np.array(ep["goal_gt"][:2])
     t0 = time.monotonic()
     state["cmd_nonzero"] = 0; state["cmd_total"] = 0
