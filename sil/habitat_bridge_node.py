@@ -11,7 +11,7 @@ import argparse, pickle, socket, struct
 import numpy as np
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import qos_profile_sensor_data
+from rclpy.qos import QoSProfile, HistoryPolicy
 from sensor_msgs.msg import Image, CameraInfo
 from geometry_msgs.msg import Twist, PoseStamped
 import cv2
@@ -22,8 +22,9 @@ class Bridge(Node):
         super().__init__("habitat_bridge")
         self.sock = socket.create_connection((host, port))
         self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-        self.pub_img = self.create_publisher(Image, "/camera/camera/color/image_raw", qos_profile_sensor_data)  # match the real camera driver (best-effort): RELIABLE 1.2MB bursts churned the subscriber executor
-        self.pub_info = self.create_publisher(CameraInfo, "/camera/camera/color/camera_info", qos_profile_sensor_data)
+        qos1 = QoSProfile(depth=1, history=HistoryPolicy.KEEP_LAST)   # RELIABLE (subscribers require it) but depth-1: latest-only, no burst backlog
+        self.pub_img = self.create_publisher(Image, "/camera/camera/color/image_raw", qos1)
+        self.pub_info = self.create_publisher(CameraInfo, "/camera/camera/color/camera_info", 10)
         self.pub_gt = self.create_publisher(PoseStamped, "/sim/gt_pose", 5)
         self.create_subscription(Twist, "/cmd_vel", self.cmd_cb, 5)
         # teleport: position = habitat xyz, orientation.z = yaw (rad). For episode setup/scoring.
