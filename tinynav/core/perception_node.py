@@ -196,6 +196,10 @@ class PerceptionNode(Node):
         loop_start = time.perf_counter()
         with Timer(name="Perception Loop", text="[{name}] Elapsed time: {milliseconds:.0f} ms\n\n", logger=self.logger.info):
             processed = self._async_loop.run_until_complete(self.process(left_msg))
+        if _os.environ.get("TINYNAV_CB_WATCHDOG") == "1":
+            _dur = time.perf_counter() - loop_start
+            if _dur > 0.5:
+                print(f"[cbwatchdog] callback DURATION {_dur:.2f}s (slow-callback side)", flush=True)
         if processed:
             processed["stats"]["loop_ms"] = (time.perf_counter() - loop_start) * 1000.0
             self.stats_pub.publish(String(data=json.dumps(processed)))
