@@ -22,8 +22,9 @@ class Bridge(Node):
         super().__init__("habitat_bridge")
         self.sock = socket.create_connection((host, port))
         self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-        qos1 = QoSProfile(depth=1, history=HistoryPolicy.KEEP_LAST)   # RELIABLE (subscribers require it) but depth-1: latest-only, no burst backlog
-        self.pub_img = self.create_publisher(Image, "/camera/camera/color/image_raw", qos1)
+        # depth must MATCH camera_info's: perception exact-stamp-syncs the pair, and an asymmetric
+        # depth-1 image queue dropped frames under jitter -> synchronizer starved (13s callback gaps)
+        self.pub_img = self.create_publisher(Image, "/camera/camera/color/image_raw", 10)
         self.pub_info = self.create_publisher(CameraInfo, "/camera/camera/color/camera_info", 10)
         self.pub_gt = self.create_publisher(PoseStamped, "/sim/gt_pose", 5)
         self.create_subscription(Twist, "/cmd_vel", self.cmd_cb, 5)
