@@ -90,6 +90,9 @@ for ep in SPEC:
     for _ in range(3):
         pub_pois.publish(String(data=json.dumps({"0": {"position": g}})))
         spin(4)
+    # release our own latched pause: with TWO transient-local publishers on /nav/paused the
+    # subscriber may get our stale True after map_node's False (latched multi-pub footgun)
+    pub_paused.publish(Bool(data=False))
     goal_gt = np.array(ep["goal_gt"][:2])
     t0 = time.monotonic()
     state["cmd_nonzero"] = 0; state["cmd_total"] = 0
