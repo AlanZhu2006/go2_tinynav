@@ -12,8 +12,6 @@ for i in $(seq 0 $((N-1))); do
   # VERIFIED kill via staged script (inline quoting through docker exec proved fragile:
   # a zombie morning map_node survived every episode and duelled topics all afternoon)
   docker exec sil bash /tmp/claude-1000/sil_epkill.sh
-  : > $LOG/sil_map.log   # truncate BEFORE relaunch: the localization wait greps this file
-  : > $LOG/sil_perception.log
   sleep 2
   docker exec -d sil bash -c "$ENVSET && TINYNAV_CB_WATCHDOG=1 TINYNAV_IMG_QOS_RELIABLE=1 python3 -m tinynav.core.perception_node > $LOG/sil_perception.log 2>&1"
   docker exec -d sil bash -c "$ENVSET && rm -rf $LOG/sil_navdb && mkdir -p $LOG/sil_navdb && python3 -m tinynav.core.map_node --tinynav_db_path $LOG/sil_navdb --tinynav_map_path $MAPD > $LOG/sil_map.log 2>&1"
