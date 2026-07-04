@@ -469,7 +469,9 @@ def main(args=None):
 
     perception_node = PerceptionNode(verbose_timer=parsed_args.verbose_timer)
 
-    executor = rclpy.executors.MultiThreadedExecutor()
+    # SingleThreaded: rclpy MultiThreadedExecutor has a known load-dependent starvation bug
+    # (ready subscriptions skipped for seconds). Only 2 subs here; FIFO is what we want.
+    executor = rclpy.executors.SingleThreadedExecutor()
     executor.add_node(perception_node)
     executor.spin()
     perception_node.destroy_node()
