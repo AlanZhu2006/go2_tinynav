@@ -19,7 +19,7 @@ SPEC = json.load(open(sys.argv[1]))["episodes"]
 if len(sys.argv) > 2:                      # --single N: one episode per process (host orchestrates
     SPEC = [SPEC[int(sys.argv[2])]]        # node restarts between episodes = clean VO per episode)
 OUT = "/tmp/claude-1000/sil_episode_results.json"
-GOAL_TOL = 0.6
+GOAL_TOL = 0.45
 EP_TIMEOUT = 900.0
 LOC_TIMEOUT = 240.0
 FREEZE_S = 240.0   # stop-and-go duty ~30%: bursts arrive, don't kill them early
@@ -64,7 +64,7 @@ for ep in SPEC:
     want = np.array([ep["start_h"][0], -ep["start_h"][2]])
     for _ in range(10):
         spin(2)
-        if state["gt"] is not None and np.linalg.norm(np.array(state["gt"][:2]) - want) < 1.0:
+        if state["gt"] is not None and np.linalg.norm(np.array(state["gt"][:2]) - want) < 0.5:
             break
         pub_reset.publish(rp)
     else:
@@ -98,16 +98,22 @@ for ep in SPEC:
     state["cmd_nonzero"] = 0; state["cmd_total"] = 0
     last_move_t = time.monotonic()
     last_pos = state["gt"].copy() if state["gt"] is not None else None
+    path_len = 0.0
+    start_goal_d = float(np.linalg.norm(state["gt"] - goal_gt)) if state["gt"] is not None else 0.0
     outcome = "timeout"
     while time.monotonic() - t0 < EP_TIMEOUT:
         spin(2)
         if state["gt"] is None:
             continue
         if last_pos is None or np.linalg.norm(state["gt"] - last_pos) > 0.05:
+            if last_pos is not None:
+                path_len += float(np.linalg.norm(state["gt"] - last_pos))
             last_pos = state["gt"].copy()
             last_move_t = time.monotonic()
         d = float(np.linalg.norm(state["gt"] - goal_gt))
-        if d < GOAL_TOL:
+        # success requires ACTUAL DRIVING: cumulative GT path >= 70% of the start-goal gap
+        # (kills every phantom-success class: stale GT, near-start goals, setup drift)
+        if d < GOAL_TOL and path_len >= 0.7 * start_goal_d:
             outcome = "SUCCESS"
             break
         if time.monotonic() - last_move_t > FREEZE_S:
@@ -115,7 +121,7 @@ for ep in SPEC:
             break
     duty = state["cmd_nonzero"] / max(state["cmd_total"], 1)
     d_final = float(np.linalg.norm(state["gt"] - goal_gt)) if state["gt"] is not None else -1
-    print(f"ep{ep['ep']}: {outcome} final_goal_dist={d_final:.2f} duty={duty:.2f} t={time.monotonic()-t0:.0f}s", flush=True)
+    print(f"ep{ep['ep']}: {outcome} final_goal_dist={d_final:.2f} duty={duty:.2f} path={path_len:.1f}m t={time.monotonic()-t0:.0f}s", flush=True)
     results.append(dict(ep=ep["ep"], outcome=outcome, final_dist=d_final, duty=round(duty, 3)))
     json.dump(results, open(OUT, "w"), indent=1)
 
