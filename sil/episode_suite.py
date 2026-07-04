@@ -54,7 +54,14 @@ for ep in SPEC:
     rp.pose.position.x, rp.pose.position.y, rp.pose.position.z = ep["start_h"]
     rp.pose.orientation.z = ep["yaw"]
     pub_reset.publish(rp)
-    spin(5)
+    # verify the teleport actually landed before scoring anything (stale-GT race gave a
+    # phantom 2s "success" scored from the previous episode's final position)
+    want = np.array([ep["start_h"][0], ep["start_h"][2]])
+    for _ in range(10):
+        spin(2)
+        if state["gt"] is not None and np.linalg.norm(np.array([state["gt"][0], -state["gt"][1]]) - np.array([want[0], -want[1]])) < 1.0:
+            break
+        pub_reset.publish(rp)
     # wait localization: fresh reloc messages arriving
     t0 = time.monotonic()
     ok_loc = False
