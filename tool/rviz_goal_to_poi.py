@@ -6,7 +6,7 @@ import tempfile
 from pathlib import Path
 
 import rclpy
-from geometry_msgs.msg import PoseStamped
+from geometry_msgs.msg import PointStamped, PoseStamped
 from rclpy.duration import Duration
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile
@@ -79,15 +79,26 @@ class RvizGoalToPoi(Node):
         self.args = args
         self.map_path = Path(args.tinynav_map_path)
         self.pois_path = self.map_path / "pois.json"
-        self.publisher = self.create_publisher(String, args.cmd_pois_topic, 10)
+        poi_qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        self.publisher = self.create_publisher(String, args.cmd_pois_topic, poi_qos)
+        self._last_payload: str | None = None
+        self.create_timer(2.0, self._republish)
         marker_qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self.marker_publisher = self.create_publisher(MarkerArray, args.marker_topic, marker_qos)
         self.pose_marker_publisher = self.create_publisher(PoseStamped, args.pose_marker_topic, marker_qos)
         self.subscription = self.create_subscription(PoseStamped, args.goal_topic, self.goal_callback, 10)
+        self.point_subscription = self.create_subscription(PointStamped, "/clicked_point", self.point_callback, 10)
         self.get_logger().info(
             f"Listening on {args.goal_topic}; writing {self.pois_path}; "
             f"publishing {args.cmd_pois_topic}, {args.marker_topic}, and {args.pose_marker_topic}"
         )
+
+    def _republish(self) -> None:
+        if self._last_payload is None:
+            return
+        out = String()
+        out.data = self._last_payload
+        self.publisher.publish(out)
 
     def publish_marker(self, goal_msg: PoseStamped, position: list[float]) -> None:
         header = goal_msg.header
@@ -189,6 +200,7 @@ class RvizGoalToPoi(Node):
 
         out = String()
         out.data = json.dumps(payload, separators=(",", ":"))
+        self._last_payload = out.data
         self.publisher.publish(out)
         self.publish_marker(msg, poi_position)
         self.get_logger().info(
@@ -196,6 +208,15 @@ class RvizGoalToPoi(Node):
             f"id={poi['id']} position={poi['position']} frame={msg.header.frame_id!r} "
             f"subscribers={self.publisher.get_subscription_count()}"
         )
+
+    def point_callback(self, msg: PointStamped) -> None:
+        goal = PoseStamped()
+        goal.header = msg.header
+        goal.pose.position.x = msg.point.x
+        goal.pose.position.y = msg.point.y
+        goal.pose.position.z = msg.point.z
+        goal.pose.orientation.w = 1.0
+        self.goal_callback(goal)
 
 
 def main() -> int:

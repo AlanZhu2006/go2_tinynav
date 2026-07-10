@@ -245,9 +245,26 @@ class MapNode(Node):
         self.poi_index = -1
         self._nav_completed = False
         self._arrival_count = 0
+        self._arrival_defer_log_t = 0.0
+        self.arrival_xy_m = float(os.environ.get("TINYNAV_ARRIVAL_XY_M", "0.25"))
+        self.arrival_confirm_n = int(os.environ.get("TINYNAV_ARRIVAL_CONFIRM_N", "5"))
+        self.arrival_min_odom_m = float(os.environ.get("TINYNAV_ARRIVAL_MIN_ODOM_M", "0.20"))
+        self.arrival_odom_fraction = float(os.environ.get("TINYNAV_ARRIVAL_ODOM_FRACTION", "0.70"))
+        self.arrival_odom_step_max_m = float(os.environ.get("TINYNAV_ARRIVAL_ODOM_STEP_MAX_M", "0.50"))
+        self.arrival_probe_m = float(os.environ.get("TINYNAV_ARRIVAL_PROBE_M", "0.28"))
+        self.arrival_probe_max_m = float(os.environ.get("TINYNAV_ARRIVAL_PROBE_MAX_M", "0.45"))
         self._leg_initial_length: float | None = None
+        self._leg_start_goal_xy_m: float | None = None
         self._leg_start_time: float | None = None
         self._speed_estimate: float | None = None
+        self._leg_plan_count = 0
+        self._last_reloc_wall_time = 0.0
+        self._last_reloc_weight = -np.inf
+        self._last_continuous_odom_xy: np.ndarray | None = None
+        self._leg_odom_start_xy: np.ndarray | None = None
+        self._leg_odom_last_xy: np.ndarray | None = None
+        self._leg_odom_distance = 0.0
+        self._arrival_probe_active = False
 
         self.poi_pub = self.create_publisher(Odometry, "/mapping/poi", 10)
         self.poi_change_pub = self.create_publisher(Odometry, "/mapping/poi_change", 10)
@@ -316,10 +333,9 @@ class MapNode(Node):
             self.poi_index = min(0, len(self.pois) - 1)
             self._nav_completed = False
             self._arrival_count = 0
+            self._arrival_defer_log_t = 0.0
             self.nav_paused_pub.publish(Bool(data=False))  # resume for the new goal
-            self._leg_initial_length = None
-            self._leg_start_time = None
-            self._speed_estimate = None
+            self._reset_leg_state()
             self.get_logger().info(f"Parsed POIs: {self.pois}")
         except Exception as e:
             # SIL finding 2026-07-04: a malformed POI message must not KILL the node (it took
@@ -336,6 +352,45 @@ class MapNode(Node):
 
     def continuous_odom_callback(self, odom_msg: Odometry):
         self.continuous_odom_recorder.record_odometry_msg(odom_msg)
+        pos = odom_msg.pose.pose.position
+        xy = np.array([pos.x, pos.y], dtype=float)
+        self._last_continuous_odom_xy = xy
+        if self.poi_index == -1:
+            return
+        if self._leg_odom_start_xy is None:
+            self._leg_odom_start_xy = xy.copy()
+            self._leg_odom_last_xy = xy.copy()
+            return
+        if self._leg_odom_last_xy is None:
+            self._leg_odom_last_xy = xy.copy()
+            return
+        step = float(np.linalg.norm(xy - self._leg_odom_last_xy))
+        if step <= self.arrival_odom_step_max_m:
+            self._leg_odom_distance += step
+        self._leg_odom_last_xy = xy.copy()
+
+    def _reset_leg_state(self):
+        self._leg_initial_length = None
+        self._leg_start_goal_xy_m = None
+        self._leg_start_time = None
+        self._speed_estimate = None
+        self._leg_plan_count = 0
+        self._leg_odom_distance = 0.0
+        self._arrival_probe_active = False
+        if self._last_continuous_odom_xy is not None:
+            self._leg_odom_start_xy = self._last_continuous_odom_xy.copy()
+            self._leg_odom_last_xy = self._last_continuous_odom_xy.copy()
+        else:
+            self._leg_odom_start_xy = None
+            self._leg_odom_last_xy = None
+
+    def _arrival_odom_required(self) -> float:
+        leg_scale = self._leg_start_goal_xy_m
+        if leg_scale is None:
+            leg_scale = self._leg_initial_length
+        if leg_scale is None:
+            return self.arrival_min_odom_m
+        return max(self.arrival_min_odom_m, self.arrival_odom_fraction * float(leg_scale))
 
     def localization_stop_callback(self, msg: Bool):
         if msg.data:
@@ -608,6 +663,8 @@ class MapNode(Node):
         self.relocation_pub.publish(np2msg(pose_in_world, timestamp, "world", "camera"))
         self.relocalization_poses[timestamp_ns] = pose_in_world
         self.relocalization_pose_weights[timestamp_ns] = pose_cov_weight
+        self._last_reloc_wall_time = time.time()
+        self._last_reloc_weight = pose_cov_weight
         return True, pose_in_world
 
     def save_relocalization_poses(self):
@@ -710,10 +767,32 @@ class MapNode(Node):
             poi = self.pois[self.poi_index]
             diff_position_norm_xy = np.linalg.norm(poi[:2] - pose_in_map_position[:2])
             diff_position_norm_z = np.linalg.norm(poi[2] - pose_in_map_position[2])
-            if diff_position_norm_xy < 0.4 and diff_position_norm_z < 2.0:
+            if diff_position_norm_xy < self.arrival_xy_m and diff_position_norm_z < 2.0:
+                now_wall = time.time()
+                reloc_age = now_wall - self._last_reloc_wall_time if self._last_reloc_wall_time > 0.0 else float("inf")
+                odom_required = self._arrival_odom_required()
+                plan_reloc_supported = (
+                    self._leg_plan_count > 0
+                    and reloc_age < 8.0
+                    and self._last_reloc_weight >= 0.55
+                )
+                odom_supported = self._leg_odom_distance >= odom_required
+                arrival_supported = plan_reloc_supported and odom_supported
+                self._arrival_probe_active = plan_reloc_supported and not odom_supported
+                if not arrival_supported:
+                    self._arrival_count = 0
+                    if now_wall - self._arrival_defer_log_t > 5.0:
+                        self.get_logger().info(
+                            "arrival deferred: missing plan/reloc/odom support "
+                            f"(plan_count={self._leg_plan_count}, reloc_age={reloc_age:.1f}s, "
+                            f"reloc_weight={self._last_reloc_weight:.2f}, "
+                            f"odom_progress={self._leg_odom_distance:.2f}m/{odom_required:.2f}m)"
+                        )
+                        self._arrival_defer_log_t = now_wall
+                    break
                 self._arrival_count += 1
-                if self._arrival_count < 3:
-                    break   # debounce: need 3 consecutive in-radius frames (guards vs reloc jitter)
+                if self._arrival_count < self.arrival_confirm_n:
+                    break   # debounce: need consecutive in-radius frames (guards vs reloc jitter)
                 self._arrival_count = 0
                 if self._leg_initial_length is not None:
                     arrived_msg = String()
@@ -727,8 +806,7 @@ class MapNode(Node):
                     self.nav_progress_pub.publish(arrived_msg)
                 self.poi_index += 1
                 self.nogo_cells.clear()   # new leg: forget local blockages
-                self._leg_initial_length = None
-                self._leg_start_time = None
+                self._reset_leg_state()
                 dummy_pose = np.eye(4)
 
                 stamp_msg = self.get_clock().now().to_msg()
@@ -738,6 +816,7 @@ class MapNode(Node):
                 continue
             else:
                 self._arrival_count = 0
+                self._arrival_probe_active = False
                 break
 
         # empty POI list = idle (goal message may be lost/late), NOT completion — declaring
@@ -752,12 +831,15 @@ class MapNode(Node):
             return
 
         goal_dist = float(np.linalg.norm(self.pois[self.poi_index][:2] - pose_in_map_position[:2]))
+        if self._leg_start_goal_xy_m is None:
+            self._leg_start_goal_xy_m = goal_dist
         self.goal_distance_pub.publish(Float32(data=goal_dist))
         target_poi = self.pois[self.poi_index]
         with Timer(name = "generate nav path in map", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
             paths_in_map = self.generate_nav_path_in_map(pose_in_map = pose_in_map, target_poi = target_poi)
 
         if paths_in_map is not None:
+            self._leg_plan_count += 1
             remaining_length = sum(
                 np.linalg.norm(paths_in_map[i + 1] - paths_in_map[i])
                 for i in range(len(paths_in_map) - 1)
@@ -806,6 +888,19 @@ class MapNode(Node):
                 pose_in_origin_odom = self.odom[timestamp]
                 T = pose_in_origin_odom @ np.linalg.inv(pose_in_map)
                 target_position_in_odom = T[:3, :3] @ target_position_in_map + T[:3, 3]
+                if self._arrival_probe_active:
+                    current_position_in_odom = pose_in_origin_odom[:3, 3]
+                    delta_xy = target_position_in_odom[:2] - current_position_in_odom[:2]
+                    delta_norm = float(np.linalg.norm(delta_xy))
+                    if delta_norm > 1e-3:
+                        direction_xy = delta_xy / delta_norm
+                    else:
+                        forward = pose_in_origin_odom[:3, :3] @ np.array([0.0, 0.0, 1.0])
+                        forward_norm = float(np.linalg.norm(forward[:2]))
+                        direction_xy = forward[:2] / forward_norm if forward_norm > 1e-3 else np.array([1.0, 0.0])
+                    needed = max(0.0, self._arrival_odom_required() - self._leg_odom_distance)
+                    probe_len = min(max(self.arrival_probe_m, needed), self.arrival_probe_max_m)
+                    target_position_in_odom[:2] = current_position_in_odom[:2] + direction_xy * probe_len
                 dummy_pose = np.eye(4)
                 dummy_pose[:3, 3] = target_position_in_odom
                 #logging.info(f"target_position_in_odom: {target_position_in_odom}")

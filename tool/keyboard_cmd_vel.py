@@ -60,9 +60,9 @@ class KeyboardCmdVel(Node):
         elif key == "e":
             cmd.linear.y = -self.linear_speed
         elif key == "a":
-            cmd.angular.z = self.angular_speed
+            cmd.angular.z = min(self.angular_speed, self.max_angular)
         elif key == "d":
-            cmd.angular.z = -self.angular_speed
+            cmd.angular.z = -min(self.angular_speed, self.max_angular)
         elif key in (" ", "x"):
             pass
         elif key in ("+", "="):
@@ -72,7 +72,8 @@ class KeyboardCmdVel(Node):
             return
         elif key in ("-", "_"):
             self.linear_speed = max(0.05, self.linear_speed - 0.05)
-            self.angular_speed = max(0.1, self.angular_speed - 0.1)
+            angular_floor = 0.0 if self.max_angular <= 0.0 else 0.1
+            self.angular_speed = max(angular_floor, self.angular_speed - 0.1)
             self.print_status()
             return
         elif key == "h":

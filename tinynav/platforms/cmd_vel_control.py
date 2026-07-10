@@ -11,6 +11,7 @@ from scipy.spatial.transform import Rotation as R
 import numpy as np
 import logging
 import time
+import os
 
 # Module-level logger for cases where self.get_logger() is not available
 logger = logging.getLogger(__name__)
@@ -72,7 +73,7 @@ class CmdVelControlNode(Node):
         # rolling lookahead (/control/target_pose). Stale-aware.
         self.goal_dist = None
         self.goal_dist_time = 0.0
-        self.arrival_radius = 0.5
+        self.arrival_radius = float(os.environ.get("TINYNAV_CONTROL_ARRIVAL_RADIUS_M", "0.0"))
         self.arrival_gain = 0.7
         self.create_subscription(Float32, '/control/goal_distance', self._goal_dist_cb, 10)
         # RELOC-LOSS stop: if map localization goes stale, do not drive blind on a stale map-frame path.
@@ -82,6 +83,11 @@ class CmdVelControlNode(Node):
         # next hit (SIL 2026-07-04: drive-freeze chatter, the real dog's stop-and-go signature).
         self.reloc_stale_stop_s = 4.0
         self.reloc_period_ema = None
+        self.reloc_search_enabled = os.environ.get("TINYNAV_RELOC_SEARCH", "1") != "0"
+        self.reloc_search_max_s = float(os.environ.get("TINYNAV_RELOC_SEARCH_MAX_S", "30.0"))
+        self.reloc_search_yaw = float(os.environ.get("TINYNAV_RELOC_SEARCH_YAW", "0.25"))
+        self.reloc_search_flip_s = float(os.environ.get("TINYNAV_RELOC_SEARCH_FLIP_S", "8.0"))
+        self.reloc_search_start = None
         self.create_subscription(Odometry, '/map/relocalization', self._reloc_cb, 10)
         # Reactive forward E-STOP from LIVE depth (reloc-independent): stop if a wall is close ahead.
         self._bridge = CvBridge()
@@ -114,6 +120,7 @@ class CmdVelControlNode(Node):
             period = now - self.last_reloc_mono
             self.reloc_period_ema = period if self.reloc_period_ema is None else 0.8 * self.reloc_period_ema + 0.2 * period
         self.last_reloc_mono = now
+        self.reloc_search_start = None
 
     def _depth_cb(self, msg):
         try:
@@ -172,6 +179,19 @@ class CmdVelControlNode(Node):
         # RELOC-LOSS stop: map localization stale -> do not drive blind on a stale map-frame path.
         reloc_stop = self.reloc_stale_stop_s if self.reloc_period_ema is None else max(self.reloc_stale_stop_s, 2.5 * self.reloc_period_ema)
         if self.last_reloc_mono is not None and (now - self.last_reloc_mono) > reloc_stop:
+            if self.reloc_search_enabled:
+                if self.reloc_search_start is None:
+                    self.reloc_search_start = now
+                search_age = now - self.reloc_search_start
+                if search_age < self.reloc_search_max_s:
+                    _gate("reloc_search")
+                    out = Twist()
+                    phase = int(search_age / max(self.reloc_search_flip_s, 1e-3))
+                    direction = 1.0 if phase % 2 == 0 else -1.0
+                    out.angular.z = float(direction * min(abs(self.reloc_search_yaw), self.max_inplace_turn_speed))
+                    self.cmd_pub.publish(out)
+                    self.prev_cmd = out
+                    return
             _gate("reloc_stale")
             self.cmd_pub.publish(Twist())
             self.prev_cmd = Twist()
@@ -218,7 +238,7 @@ class CmdVelControlNode(Node):
         # Linear x: robot cannot execute tiny non-zero speeds reliably.
         # When engaging forward motion, snap to +min; when stopping/decaying, snap to 0.
         if 0.0 < out.linear.x < self.min_effective_linear_speed:
-            out.linear.x = self.min_effective_linear_speed if target_cmd.linear.x >= self.min_effective_linear_speed else 0.0
+            out.linear.x = self.min_effective_linear_speed if target_cmd.linear.x >= self.linear_engage_threshold else 0.0
         elif abs(out.linear.x) < self.min_effective_linear_speed:
             out.linear.x = 0.0
 
@@ -298,7 +318,7 @@ class CmdVelControlNode(Node):
         # Store the latest target command directly. Smoothing is intentionally kept
         # only in cmd_timer_callback via acceleration limiting, so planner/control
         # behavior stays easy to reason about during tuning.
-        if self.goal_dist is not None and (time.monotonic() - self.goal_dist_time) < 1.0:
+        if self.arrival_radius > 0.0 and self.goal_dist is not None and (time.monotonic() - self.goal_dist_time) < 1.0:
             if self.goal_dist < self.arrival_radius:
                 vx = 0.0; vyaw = 0.0   # arrived: stop
             else:

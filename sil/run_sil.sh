@@ -38,7 +38,30 @@ perception_server:
 EOF
 
 step "[4/5] container: ROS graph (docker exec, logs in $LOG/sil_*.log)"
-docker exec sil bash -c "pkill -f 'tinynav.cor[e]|habitat_bridge_nod[e]|cmd_vel_contro[l]' 2>/dev/null; true"
+docker exec sil bash -lc '
+patterns=(
+  "habitat_bridge_node[.]py"
+  "tinynav.core.[p]erception_node"
+  "tinynav.core.[m]ap_node"
+  "tinynav.core.[p]lanning_node"
+  "tinynav.platforms.[c]md_vel_control"
+)
+for pat in "${patterns[@]}"; do
+  for pid in $(pgrep -f "$pat" 2>/dev/null || true); do kill "$pid" 2>/dev/null || true; done
+done
+for _ in $(seq 1 10); do
+  remaining=0
+  for pat in "${patterns[@]}"; do
+    n=$(pgrep -cf "$pat" 2>/dev/null || true)
+    remaining=$((remaining + ${n:-0}))
+  done
+  [ "$remaining" = "0" ] && break
+  sleep 1
+done
+for pat in "${patterns[@]}"; do
+  for pid in $(pgrep -f "$pat" 2>/dev/null || true); do kill -9 "$pid" 2>/dev/null || true; done
+done
+'
 ENVSET="source /opt/ros/humble/setup.bash && cd /sil && export PYTHONPATH=/sil:/tinynav:\$PYTHONPATH GO2_LINGBOTNAV_CONFIG=$LOG/sil_config.yaml"
 docker exec -d sil bash -c "$ENVSET && python3 sil/habitat_bridge_node.py --rate 20 > $LOG/sil_bridge.log 2>&1"
 sleep 3
